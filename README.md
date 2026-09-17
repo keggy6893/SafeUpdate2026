@@ -23,7 +23,7 @@ Der Installer laedt die in `latest.json` angegebene Version, prueft SHA256 und P
 
 - `install.sh` – Telnet-Installer
 - `latest.json` – aktuelle Version, Download und SHA256
-- `releases/` – Plugin-ZIP-Dateien
+- `SafeUpdate2026_2026.1-r24.zip` – aktuelle Plugin-Datei
 
 ## Aktuelle SHA256
 
