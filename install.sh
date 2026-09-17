@@ -7,7 +7,8 @@ TMPDIR="/tmp/safeupdate2026-install"
 ZIPFILE="$TMPDIR/base.zip"
 EXTRACT="$TMPDIR/extract"
 PLUGIN_DIR="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
-BACKUP_DIR="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026.before-install"
+BACKUP_DIR="/tmp/safeupdate2026-before-install"
+LEGACY_BACKUP_DIR="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026.before-install"
 
 say() { echo "[SafeUpdate2026] $*"; }
 fail() { say "FEHLER: $*"; exit 1; }
@@ -83,6 +84,10 @@ extract_zip() {
 command -v python3 >/dev/null 2>&1 || fail "python3 fehlt."
 command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || fail "weder wget noch curl vorhanden."
 
+# Alte Installer-Sicherung aus dem Enigma2-Pluginbaum entfernen.
+# Dieser Pfad wurde von Enigma2 als eigenes Plugin gescannt und darf dort nicht existieren.
+rm -rf "$LEGACY_BACKUP_DIR"
+rm -rf "$BACKUP_DIR"
 rm -rf "$TMPDIR"
 mkdir -p "$EXTRACT" || fail "Temp-Verzeichnis konnte nicht erstellt werden."
 
@@ -196,6 +201,9 @@ if ! syntax_check "$PLUGIN_DIR/plugin.py"; then
     fail "Syntaxpruefung nach Installation fehlgeschlagen."
 fi
 
+# Erfolgreiche Installation: Rollback-Kopie und alte fehlerhafte Plugin-Sicherung entfernen.
+rm -rf "$BACKUP_DIR"
+rm -rf "$LEGACY_BACKUP_DIR"
 sync
 rm -rf "$TMPDIR"
 say "SafeUpdate2026 $VERSION wurde erfolgreich installiert."
