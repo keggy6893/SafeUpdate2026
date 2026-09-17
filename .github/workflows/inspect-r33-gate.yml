@@ -1,0 +1,60 @@
+name: Inspect r33 rotation gate
+
+on:
+  push:
+    branches: [r33-dev]
+    paths:
+      - '.r33-gate-inspect-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract rotation and receiver detection code
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r33gate
+          mkdir -p /tmp/r33gate
+          unzip -q SafeUpdate2026_2026.1-r33-dev2.zip -d /tmp/r33gate
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/r33gate/SafeUpdate2026/plugin.py')
+          lines = p.read_text(encoding='utf-8').splitlines()
+          needles = [
+              'def is_gbtrio4k', 'def current_slot', 'def receiver_name', 'def detect',
+              'MACHINEBUILD', 'boxtype', 'model', 'vu', 'duo4k',
+              'def ensure_rotation_state', 'def physically_verified_rotation_state',
+              'def rotation_status_text', 'def check(self, force=False',
+              'def toggle_rotation', 'def force_rotation_now', 'rotation_enabled',
+              'def rotation_sessionstart', 'def get_rotation_service',
+              'compatible_startup_slots', 'gigablue_kernel_layout_ok'
+          ]
+          spans=[]
+          for i,line in enumerate(lines):
+              if any(n.lower() in line.lower() for n in needles):
+                  spans.append((max(0,i-20), min(len(lines),i+45)))
+          spans.sort()
+          merged=[]
+          for a,b in spans:
+              if not merged or a > merged[-1][1]+3:
+                  merged.append([a,b])
+              else:
+                  merged[-1][1]=max(merged[-1][1],b)
+          out=[]
+          for a,b in merged:
+              out.append('\n===== lines %d-%d =====\n' % (a+1,b))
+              out.extend('%5d: %s' % (j+1, lines[j]) for j in range(a,b))
+          Path('.r33-gate-snippets.txt').write_text('\n'.join(out)+'\n', encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .r33-gate-snippets.txt
+          git commit -m 'Capture r33 rotation gate snippets' || true
+          git push origin HEAD:r33-dev
