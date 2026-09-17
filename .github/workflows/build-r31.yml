@@ -1,0 +1,53 @@
+name: Build SafeUpdate2026 r31 ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.r31-build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r31:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify r31
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r31build
+          mkdir -p /tmp/r31build
+          unzip -q SafeUpdate2026_2026.1-r30.zip -d /tmp/r31build
+          python3 .r31-src/patch_r31.py /tmp/r31build/SafeUpdate2026/plugin.py
+          python3 -m py_compile /tmp/r31build/SafeUpdate2026/plugin.py
+          printf '%s\n' \
+            'SafeUpdate2026 2026.1-r31' \
+            '=========================' \
+            '' \
+            'GigaBlue UHD Trio 4K: STARTUP-Parser akzeptiert die echte quoted boot-Syntax.' \
+            'root=/dev/mmcblk0p16 wird auch direkt nach dem fuehrenden Hochkomma erkannt.' \
+            'Slot-/Kernel-, Backup-, Killswitch- und Update-Sicherheitslogik aus r30 bleibt unveraendert.' \
+            > /tmp/r31build/SafeUpdate2026/README.txt
+          rm -f SafeUpdate2026_2026.1-r31.zip
+          cd /tmp/r31build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r31.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r31.zip | awk '{print $1}')"
+          python3 -c 'import json,sys; data={"version":"2026.1-r31","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r31.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("latest.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$SHA"
+
+      - name: Publish r31 and clean temporary files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r31.zip latest.json
+          git rm -r -f .r31-src .r31-build-trigger .github/workflows/build-r31.yml
+          git commit -m "Add SafeUpdate2026 2026.1-r31 GigaBlue STARTUP parser fix"
+          git push origin HEAD:main
