@@ -1,0 +1,527 @@
+name: Build SafeUpdate2026 r30 ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.r30-build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r30:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build r30 with GigaBlue UHD Trio 4K support
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r30build
+          mkdir -p /tmp/r30build
+          unzip -q SafeUpdate2026_2026.1-r29.zip -d /tmp/r30build
+          cd /tmp/r30build
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+
+          def one(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit('%s: expected 1 match, got %d' % (label, n))
+              s = s.replace(old, new, 1)
+
+          one('PLUGIN_VERSION = "2026.1-r29"', 'PLUGIN_VERSION = "2026.1-r30"', 'version')
+
+          marker = '''KERNEL_PACKAGES = (
+    "kernel-4.1.45-1.17",
+    "kernel-image-4.1.45-1.17",
+    "kernel-image-zimage-4.1.45-1.17",
+)
+'''
+          injected = marker + '''
+# r30: verified GigaBlue UHD Trio 4K layout from the real test receiver.
+# Internal multiboot slots 1-4 share /dev/mmcblk0p16 for rootfs subdirectories
+# and use dedicated 16 MiB kernel partitions p12-p15.
+GBTRIO4K_KERNEL_PACKAGES = (
+    "kernel-4.4.35",
+    "kernel-image-4.4.35",
+    "kernel-image-uimage-4.4.35",
+)
+GBTRIO4K_ROOT_DEVICE = "/dev/mmcblk0p16"
+GBTRIO4K_KERNEL_DEVICES = {
+    1: "/dev/mmcblk0p12",
+    2: "/dev/mmcblk0p13",
+    3: "/dev/mmcblk0p14",
+    4: "/dev/mmcblk0p15",
+}
+'''
+          one(marker, injected, 'gb constants')
+
+          cmd_marker = '''def cmdline():
+    return read_text("/proc/cmdline").strip()
+'''
+          cmd_injected = cmd_marker + '''
+
+def machinebuild():
+    return cmd_value("MACHINEBUILD").strip().lower()
+
+
+def oem_name():
+    return cmd_value("OEM").strip().lower()
+
+
+def is_gbtrio4k():
+    # Do not trust /proc/stb/info/model on this receiver: the tested box reports dm8000.
+    return machinebuild() == "gbtrio4k" and oem_name() == "gigablue"
+
+
+def kernel_packages():
+    return GBTRIO4K_KERNEL_PACKAGES if is_gbtrio4k() else KERNEL_PACKAGES
+
+
+def active_kernel_device():
+    value = cmd_value("kernel").strip()
+    if value.startswith("/dev/"):
+        return os.path.realpath(value)
+    return ""
+
+
+def expected_kernel_device(slot):
+    if not is_gbtrio4k():
+        return ""
+    try:
+        return os.path.realpath(GBTRIO4K_KERNEL_DEVICES[int(slot)])
+    except Exception:
+        return ""
+'''
+          one(cmd_marker, cmd_injected, 'machine helpers')
+
+          # Replace parse_startup_text wholesale: keep classic in-tree zImage support,
+          # add the verified GigaBlue external kernel-partition layout.
+          pat = re.compile(r'^def parse_startup_text\(slot, text, path=""\):.*?^def startup_slots\(\):', re.M | re.S)
+          repl = '''def parse_startup_text(slot, text, path=""):
+    root = ""
+    rootsubdir = ""
+    kernel = ""
+
+    m = re.search(r"(?:^|\\s)root=([^\\s]+)", text or "")
+    if m:
+        root = m.group(1)
+
+    m = re.search(r"(?:^|\\s)rootsubdir=([^\\s]+)", text or "")
+    if m:
+        rootsubdir = m.group(1)
+
+    m = re.search(r"(?:^|\\s)kernel=([^\\s]+)", text or "")
+    if m:
+        kernel = m.group(1)
+
+    rootsubdir = safe_rootsubdir(rootsubdir, slot)
+    if not root or not rootsubdir or not kernel:
+        return None
+
+    kernel_norm = os.path.normpath(kernel.strip().lstrip("/"))
+    expected_tree_kernel = os.path.join(rootsubdir, "zImage")
+    kernel_device = ""
+    kernel_in_tree = kernel_norm == expected_tree_kernel
+    if kernel.startswith("/dev/"):
+        kernel_device = os.path.realpath(kernel)
+    elif not kernel_in_tree:
+        return None
+
+    dev = resolve_root_spec(root)
+    if not dev:
+        return None
+
+    return {
+        "slot": int(slot),
+        "path": path,
+        "root_spec": root,
+        "root_device": dev,
+        "rootsubdir": rootsubdir,
+        "kernel": kernel,
+        "kernel_device": kernel_device,
+        "kernel_in_tree": kernel_in_tree,
+    }
+
+
+def startup_slots():'''
+          s, n = pat.subn(repl, s, count=1)
+          if n != 1:
+              raise SystemExit('parse_startup_text replacement failed')
+
+          old_full = '''def _full_mount_is_valid(mountpoint):
+    sub = active_rootsubdir()
+    if not mountpoint or not sub:
+        return False
+    src = os.path.join(mountpoint, sub)
+    return (
+        os.path.isdir(src) and
+        os.path.isfile(os.path.join(src, "zImage")) and
+        os.path.isfile(os.path.join(src, "etc", "image-version"))
+    )
+'''
+          new_full = '''def slot_root_tree_valid(path):
+    common = (
+        os.path.isdir(path) and
+        os.path.isfile(os.path.join(path, "etc", "image-version")) and
+        os.path.exists(os.path.join(path, "sbin", "init")) and
+        os.path.isfile(os.path.join(path, "usr", "bin", "enigma2"))
+    )
+    if not common:
+        return False
+    if is_gbtrio4k():
+        return True
+    return os.path.isfile(os.path.join(path, "zImage"))
+
+
+def _full_mount_is_valid(mountpoint):
+    sub = active_rootsubdir()
+    if not mountpoint or not sub:
+        return False
+    return slot_root_tree_valid(os.path.join(mountpoint, sub))
+'''
+          one(old_full, new_full, 'full mount validation')
+
+          old_kexec = '''def kexec_ok():
+    return sha256_prefix(KEXEC_DEVICE, KEXEC_SIZE) == KEXEC_GOOD_HASH
+'''
+          new_kexec = '''def gigablue_kernel_layout_ok():
+    if not is_gbtrio4k():
+        return False
+    slot = current_slot()
+    if slot not in GBTRIO4K_KERNEL_DEVICES:
+        return False
+    if os.path.realpath(root_device() or "") != os.path.realpath(GBTRIO4K_ROOT_DEVICE):
+        return False
+    if active_kernel_device() != expected_kernel_device(slot):
+        return False
+    slots = startup_slots()
+    for number, device in sorted(GBTRIO4K_KERNEL_DEVICES.items()):
+        info = slots.get(number)
+        if not info:
+            return False
+        if info.get("rootsubdir") != "linuxrootfs%d" % number:
+            return False
+        if os.path.realpath(info.get("root_device") or "") != os.path.realpath(GBTRIO4K_ROOT_DEVICE):
+            return False
+        if os.path.realpath(info.get("kernel_device") or "") != os.path.realpath(device):
+            return False
+    return True
+
+
+def kexec_ok():
+    # On VU+ retain the established KEXEC hash check.  The GigaBlue UHD Trio 4K
+    # does not use that VU+ KEXEC image; verify its native four kernel slots instead.
+    if is_gbtrio4k():
+        return gigablue_kernel_layout_ok()
+    return sha256_prefix(KEXEC_DEVICE, KEXEC_SIZE) == KEXEC_GOOD_HASH
+
+
+def kernel_device_for_slot(slot):
+    info = startup_slots().get(int(slot))
+    if not info:
+        return ""
+    return os.path.realpath(info.get("kernel_device") or "")
+
+
+def slot_backup_valid(slot, path, expected_kernel_hash=""):
+    if not slot_root_tree_valid(path):
+        return False
+    if not is_gbtrio4k():
+        return True
+    kernel_dev = kernel_device_for_slot(slot)
+    if not kernel_dev or not os.path.exists(kernel_dev):
+        return False
+    target_hash = sha256_prefix(kernel_dev)
+    if not target_hash:
+        return False
+    if expected_kernel_hash:
+        return target_hash == expected_kernel_hash
+    source_dev = active_kernel_device()
+    source_hash = sha256_prefix(source_dev) if source_dev else ""
+    return bool(source_hash and target_hash == source_hash)
+'''
+          one(old_kexec, new_kexec, 'kernel guard')
+
+          old_holds = '''def holds_ok():
+    return all(package_on_hold(p) for p in KERNEL_PACKAGES)
+'''
+          new_holds = '''def holds_ok():
+    return all(package_on_hold(p) for p in kernel_packages())
+
+
+def ensure_kernel_holds():
+    for package in kernel_packages():
+        try:
+            if subprocess.call(["opkg", "flag", "hold", package]) != 0:
+                return False
+        except Exception:
+            return False
+    return holds_ok()
+'''
+          one(old_holds, new_holds, 'dynamic hold packages')
+
+          # Source-tree validation must not require zImage inside linuxrootfsN on GigaBlue.
+          old_src_check = '''        if not os.path.isfile(os.path.join(src, "zImage")) or not os.path.isfile(os.path.join(src, "etc", "image-version")):
+'''
+          one(old_src_check, '''        if not slot_root_tree_valid(src):
+''', 'backup source validation')
+
+          # Replace only the backup copy script. Classic boxes keep the existing script;
+          # GigaBlue additionally clones and hashes the dedicated kernel partition.
+          script_pat = re.compile(r'        script = """\nset -e\nSRC=\{src\}.*?"""\.format\(src=shq\(src\), dst=shq\(dst\)\)', re.S)
+          script_repl = '''        if is_gbtrio4k():
+            src_kernel = active_kernel_device()
+            dst_kernel = kernel_device_for_slot(target)
+            if not src_kernel or not dst_kernel or src_kernel == dst_kernel:
+                self.session.open(MessageBox, "GigaBlue Kernel-Slot ist nicht sicher verifizierbar.\\nBackup abgebrochen.", MessageBox.TYPE_ERROR)
+                return
+            script = """
+set -e
+SRC={src}
+DST={dst}
+SRC_KERNEL={src_kernel}
+DST_KERNEL={dst_kernel}
+
+test -d "$SRC"
+test -f "$SRC/etc/image-version"
+test -e "$SRC/sbin/init"
+test -f "$SRC/usr/bin/enigma2"
+test -b "$SRC_KERNEL"
+test -b "$DST_KERNEL"
+test ! -e "$DST"
+
+echo 'Zielslot ist weiterhin frei.'
+mkdir "$DST"
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$DST"/
+sync
+
+test -f "$DST/etc/image-version"
+test -e "$DST/sbin/init"
+test -f "$DST/usr/bin/enigma2"
+
+echo 'Kopiere GigaBlue Kernel-Slot...'
+dd if="$SRC_KERNEL" of="$DST_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+sync
+SRC_HASH=$(sha256sum "$SRC_KERNEL" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST_KERNEL" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+
+echo 'BACKUP_VERIFIED'
+""".format(src=shq(src), dst=shq(dst), src_kernel=shq(src_kernel), dst_kernel=shq(dst_kernel))
+        else:
+            script = """
+set -e
+SRC={src}
+DST={dst}
+
+test -d "$SRC"
+test -f "$SRC/zImage"
+test -f "$SRC/etc/image-version"
+test ! -e "$DST"
+
+echo 'Zielslot ist weiterhin frei.'
+mkdir "$DST"
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$DST"/
+sync
+
+test -f "$DST/zImage"
+test -f "$DST/etc/image-version"
+
+SRC_HASH=$(sha256sum "$SRC/zImage" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST/zImage" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+
+echo 'BACKUP_VERIFIED'
+""".format(src=shq(src), dst=shq(dst))'''
+          s, n = script_pat.subn(script_repl, s, count=1)
+          if n != 1:
+              raise SystemExit('backup script replacement failed')
+
+          one('''        verified = rc == 0 and os.path.isfile(os.path.join(dst, "zImage")) and os.path.isfile(os.path.join(dst, "etc", "image-version"))
+''', '''        verified = rc == 0 and slot_backup_valid(target, dst)
+''', 'backup closed validation')
+
+          old_save = '''            save_state({"source_slot": source, "target_slot": target, "created": created, "verified": True, "build": image_info().get("build", "")})
+'''
+          new_save = '''            state = {"source_slot": source, "target_slot": target, "created": created, "verified": True, "build": image_info().get("build", "")}
+            if is_gbtrio4k():
+                state["kernel_device"] = kernel_device_for_slot(target)
+                state["kernel_sha256"] = sha256_prefix(state["kernel_device"])
+            save_state(state)
+'''
+          one(old_save, new_save, 'backup state kernel hash')
+
+          # Replace rollback re-validation wholesale so a GigaBlue backup survives restart
+          # only when both rootfs and the saved kernel hash still match.
+          rollback_pat = re.compile(r'^    def load_rollback\(self\):.*?^    def paint_update_state\(self\):', re.M | re.S)
+          rollback_repl = '''    def load_rollback(self):
+        st = load_state()
+        if not st:
+            return
+        valid = False
+        target = st.get("target_slot")
+        source = st.get("source_slot")
+        try:
+            target = int(target)
+            source = int(source)
+            info = compatible_startup_slots().get(target)
+            mp = ensure_full_mount(False)
+            if info and mp:
+                dst = os.path.join(mp, info["rootsubdir"])
+                valid = slot_backup_valid(target, dst, st.get("kernel_sha256", ""))
+        except Exception:
+            valid = False
+
+        if valid:
+            self.backup_verified = True
+            self.verified_backup_slot = target
+            self["targetSlot"].setText("Slot %s – VERIFIZIERT ✓" % target)
+            self.set_backup_progress(100, "Backup-Fortschritt – Fertig", "Status: Backup in Slot %s verifiziert." % target)
+            created = (st.get("created") or "?").split(" ")[0]
+            self["rollback"].setText("Backup-Slot:  %s\\nQuelle:       Slot %s\\nErstellt:     %s\\n0 = BACKUP LÖSCHEN" % (target, source, created))
+            self.append_log("> Gespeichertes Backup erneut geprüft: Slot %s OK." % target)
+        elif st.get("verified"):
+            self.backup_verified = False
+            self.verified_backup_slot = None
+            self.set_backup_progress(0, "Backup-Fortschritt", "Status: Gespeichertes Backup fehlt – Update gesperrt.")
+            self["rollback"].setText("Noch kein gültiges Backup vorhanden.")
+            self.append_log("> Alter Backup-Status verworfen: Backup physisch nicht mehr verifizierbar.")
+            try:
+                st["verified"] = False
+                st["invalidated"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+                save_state(st)
+            except Exception:
+                pass
+
+    def paint_update_state(self):'''
+          s, n = rollback_pat.subn(rollback_repl, s, count=1)
+          if n != 1:
+              raise SystemExit('load_rollback replacement failed')
+
+          # Deletion must validate the verified tree without requiring an in-tree zImage on GigaBlue.
+          one('''            os.path.isdir(dst) and
+            os.path.isfile(os.path.join(dst, "zImage")) and
+            os.path.isfile(os.path.join(dst, "etc", "image-version")) and
+''', '''            os.path.isdir(dst) and
+            slot_root_tree_valid(dst) and
+            os.path.isfile(os.path.join(dst, "etc", "image-version")) and
+''', 'delete safe path')
+
+          # On the tested GigaBlue, set the verified 4.4.35 kernel package holds from the UI;
+          # no extra SSH command is required from the tester. Other boxes retain r29 behavior.
+          old_hold_block = '''        if not holds_ok():
+            self.session.open(MessageBox, "Nicht alle Kernel-Pakete stehen auf HOLD. Update wird blockiert.", MessageBox.TYPE_ERROR)
+            return
+'''
+          new_hold_block = '''        if not holds_ok():
+            if is_gbtrio4k():
+                self.append_log("> Setze GigaBlue Kernel-Pakete auf HOLD...")
+                if not ensure_kernel_holds():
+                    self.session.open(MessageBox, "GigaBlue Kernel-Pakete konnten nicht sicher auf HOLD gesetzt werden. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                    return
+                self.refresh_status()
+            else:
+                self.session.open(MessageBox, "Nicht alle Kernel-Pakete stehen auf HOLD. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                return
+'''
+          one(old_hold_block, new_hold_block, 'start update hold handling')
+
+          one('''        hold_cmd = "; ".join("opkg flag hold %s >/dev/null 2>&1 || true" % shq(p) for p in KERNEL_PACKAGES)
+''', '''        hold_cmd = "; ".join("opkg flag hold %s >/dev/null 2>&1 || true" % shq(p) for p in kernel_packages())
+''', 'update hold command')
+
+          p.write_text(s, encoding='utf-8')
+          compile(p.read_bytes(), str(p), 'exec')
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('SafeUpdate2026/plugin.py').read_text(encoding='utf-8')
+          checks = [
+              'PLUGIN_VERSION = "2026.1-r30"',
+              'GBTRIO4K_ROOT_DEVICE = "/dev/mmcblk0p16"',
+              '1: "/dev/mmcblk0p12"',
+              '4: "/dev/mmcblk0p15"',
+              '"kernel-4.4.35"',
+              'def gigablue_kernel_layout_ok():',
+              'dd if="$SRC_KERNEL" of="$DST_KERNEL"',
+              'scale="stretch"',
+              'resolution="1920,1080"',
+          ]
+          for item in checks:
+              if item not in s:
+                  raise SystemExit('missing r30 invariant: %s' % item)
+          if 'for p in KERNEL_PACKAGES)' in s:
+              raise SystemExit('old fixed hold package loop still present')
+          PY
+
+          cat > SafeUpdate2026/README.txt <<'EOF'
+          SafeUpdate2026 2026.1-r30
+          ==========================
+
+          r30 - GigaBlue UHD Trio 4K native multiboot support
+          ---------------------------------------------------
+          - Keeps the corrected r29 Full-HD layout.
+          - Uses MACHINEBUILD=gbtrio4k + OEM=gigablue instead of the misleading dm8000 model value.
+          - Verifies internal slots 1-4 exactly as observed on the test receiver:
+              Slot 1: linuxrootfs1 + /dev/mmcblk0p12
+              Slot 2: linuxrootfs2 + /dev/mmcblk0p13
+              Slot 3: linuxrootfs3 + /dev/mmcblk0p14
+              Slot 4: linuxrootfs4 + /dev/mmcblk0p15
+            Shared internal root device: /dev/mmcblk0p16.
+          - USB STARTUP_5/6 are intentionally excluded from SafeUpdate backup targets.
+          - GigaBlue backup clones the rootfs tree and its dedicated kernel partition, then SHA256-verifies the kernel copy.
+          - Saved GigaBlue backups are revalidated against the stored kernel SHA256 after restart.
+          - Uses the observed GigaBlue kernel packages 4.4.35 for HOLD protection.
+          - Other receiver logic remains on the r29 paths.
+          EOF
+
+          rm -f "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r30.zip"
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r30.zip" SafeUpdate2026
+          SHA="$(sha256sum "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r30.zip" | awk '{print $1}')"
+          cat > "$GITHUB_WORKSPACE/latest.json" <<EOF
+          {
+            "version": "2026.1-r30",
+            "mode": "full",
+            "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r30.zip",
+            "sha256": "$SHA",
+            "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+          }
+          EOF
+          echo "r30 sha256=$SHA"
+
+      - name: Publish r30 and clean temporary build files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r30.zip latest.json
+          rm -rf .r30-src
+          git add -A
+          for f in .r30-extract-trigger .r30-build-trigger .github/workflows/extract-r29-source.yml .github/workflows/build-r30.yml; do
+            [ ! -e "$f" ] || git rm -r "$f"
+          done
+          git commit -m "Add SafeUpdate2026 2026.1-r30 GigaBlue Trio 4K support"
+          git push origin HEAD:main
