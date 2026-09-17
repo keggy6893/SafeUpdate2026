@@ -1,0 +1,269 @@
+
+    try:
+        st = os.statvfs(path)
+        return int(st.f_bavail) * int(st.f_frsize)
+    except Exception:
+        return 0
+
+
+def sha256_prefix(path, size=None):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb", buffering=0) as f:
+            left = size
+            while True:
+                n = 1024 * 1024
+                if left is not None:
+                    if left <= 0:
+                        break
+                    n = min(n, left)
+                chunk = f.read(n)
+                if not chunk:
+                    break
+                h.update(chunk)
+                if left is not None:
+                    left -= len(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def kexec_ok():
+    return sha256_prefix(KEXEC_DEVICE, KEXEC_SIZE) == KEXEC_GOOD_HASH
+
+
+def hdd_ok():
+    for line in read_text("/proc/mounts").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "/media/usb":
+            return True
+    return False
+
+
+def _clean_hw_value(value):
+    value = str(value or "").strip()
+    if not value or value.lower() in ("unknown", "none", "n/a", "null"):
+        return ""
+    return value
+
+
+def detect_box_identity():
+    """Return a user-facing (brand, model) without assuming a specific receiver vendor."""
+    brand = ""
+    model_candidates = []
+
+    def add_model(value):
+        value = _clean_hw_value(value)
+        if value and value not in model_candidates:
+            model_candidates.append(value)
+
+    # OpenATV/OE-A SystemInfo is preferred when available. Some images return
+    # only the vendor name as displaymodel; keep collecting fallbacks instead
+    # of displaying e.g. "GigaBlue GigaBlue".
+    try:
+        from Components.SystemInfo import BoxInfo
+        for key in ("displaybrand", "brand", "manufacturer"):
+            value = _clean_hw_value(BoxInfo.getItem(key))
+            if value:
+                brand = value
+                break
+        for key in ("displaymodel", "model", "machinebuild", "boxtype", "machine"):
+            add_model(BoxInfo.getItem(key))
+    except Exception:
+        pass
+
+    # Cross-image fallbacks.
+    if not brand:
+        for path in ("/proc/stb/info/brand", "/proc/stb/info/manufacturer"):
+            value = _clean_hw_value(read_text(path))
+            if value:
+                brand = value
+                break
+    for path in ("/proc/stb/info/model", "/proc/stb/info/boxtype", "/proc/stb/info/machinebuild"):
+        add_model(read_text(path))
+
+    info = image_info()
+    for key in ("displaymodel", "model", "box_type", "machinebuild", "machine"):
+        add_model(info.get(key))
+
+    # Normalize common brand spelling before filtering model candidates.
+    b = brand.lower().replace(" ", "")
+    if b in ("vuplus", "vu+"):
+        brand = "VU+"
+    elif b == "gigablue":
+        brand = "GigaBlue"
+    elif b == "octagon":
+        brand = "Octagon"
+
+    def norm(value):
+        return re.sub(r"[^a-z0-9+]", "", (value or "").lower())
+
+    # Human-friendly names for common receiver families.
+    aliases = {
+        "vuduo4kse": ("VU+", "Duo 4K SE"),
+        "vuduo4k": ("VU+", "Duo 4K"),
+        "vuuno4kse": ("VU+", "Uno 4K SE"),
+        "vuuno4k": ("VU+", "Uno 4K"),
+        "vusolo4k": ("VU+", "Solo 4K"),
+        "vuzero4k": ("VU+", "Zero 4K"),
+        "sf8008": ("Octagon", "SF8008"),
+        "sf8008m": ("Octagon", "SF8008 M"),
+        "sf8008s": ("Octagon", "SF8008 S"),
+        "sf8008t": ("Octagon", "SF8008 T"),
+        "sf8008combo": ("Octagon", "SF8008 Combo"),
+        "sf8008supreme": ("Octagon", "SF8008 Supreme"),
+        "sf4008": ("Octagon", "SF4008"),
+        "gbquad4k": ("GigaBlue", "UHD Quad 4K"),
+        "gbquad4kpro": ("GigaBlue", "UHD Quad 4K Pro"),
+        "gbue4k": ("GigaBlue", "UHD UE 4K"),
+        "gbx34k": ("GigaBlue", "UHD X3 4K"),
+        "gbtrio4k": ("GigaBlue", "UHD Trio 4K"),
+        "gbtrio4kpro": ("GigaBlue", "UHD Trio 4K Pro"),
+    }
+
+    alias = None
+    for candidate in model_candidates:
+        key = norm(candidate)
+        if key in aliases:
+            alias = aliases[key]
+            break
+    if alias:
+        brand, model = alias
+        return brand, model
+
+    # Pick the first candidate that is more informative than the vendor name.
+    model = ""
+    brand_norm = norm(brand)
+    generic_values = {"receiver", "settopbox", "stb", "enigma2", brand_norm}
+    for candidate in model_candidates:
+        c = norm(candidate)
+        if c and c not in generic_values:
+            model = candidate.strip()
+            break
+
+    # Derive a conservative brand only from unmistakable model prefixes.
+    low = norm(model or (model_candidates[0] if model_candidates else ""))
+    if not brand:
+        if low.startswith("vu"):
+            brand = "VU+"
+        elif low.startswith("sf"):
+            brand = "Octagon"
+        elif low.startswith("gb"):
+            brand = "GigaBlue"
+        else:
+            brand = "Receiver"
+
+    if not model:
+        model = ""
+
+    return brand, model
+
+def package_on_hold(package):
+    out = run_cmd(["opkg", "status", package])
+    for line in out.splitlines():
+        if line.startswith("Status:"):
+            return " hold " in (" " + line + " ")
+    return False
+
+
+def holds_ok():
+    return all(package_on_hold(p) for p in KERNEL_PACKAGES)
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(data):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        return True
+    except Exception:
+        return False
+
+
+def shq(s):
+    return "'" + str(s).replace("'", "'\"'\"'") + "'"
+
+
+class SafeUpdateScreen(Screen):
+    skin = '''
+    <screen name="SafeUpdateScreen" position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="#000b14">
+        <ePixmap zPosition="0" position="0,0" size="1920,1080"
+                 pixmap="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026/background.png"
+                 alphatest="on" />
+        <!-- r25 distribution overlay: replaces only the vendor-specific r24 header/hero region -->
+        <ePixmap zPosition="5" position="1042,7" size="592,385"
+                 pixmap="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026/r25_overlay.png"
+                 alphatest="on" />
+
+        <!-- live time/date, aligned to approved preview -->
+        <widget zPosition="20" name="clock" position="1755,9" size="126,44"
+                font="Regular;34" halign="right" foregroundColor="#f4f8fb"
+                backgroundColor="#061a2a" transparent="1" />
+        <widget zPosition="20" name="date" position="1663,57" size="218,32"
+                font="Regular;18" halign="right" foregroundColor="#d5e4f2"
+                backgroundColor="#061a2a" transparent="1" />
+
+        <!-- r25: one dynamic receiver identity in the header; hero artwork stays vendor-neutral -->
+        <widget zPosition="35" name="boxHeader" position="1140,13" size="505,42"
+                font="Regular;22" halign="center" valign="center" foregroundColor="#f4f8fb"
+                backgroundColor="#061a2a" transparent="1" />
+
+        <!-- current image -->
+        <widget zPosition="20" name="currentInfo" position="161,188" size="597,39"
+                font="Regular;27" foregroundColor="#f4f8fb"
+                backgroundColor="#082640" transparent="1" />
+        <widget zPosition="20" name="currentOK" position="942,188" size="83,39"
+                font="Regular;25" halign="right" foregroundColor="#01f76f"
+                backgroundColor="#082640" transparent="1" />
+
+        <!-- safety statuses -->
+        <widget zPosition="20" name="kexecOK" position="942,247" size="83,37"
+                font="Regular;24" halign="right" foregroundColor="#01f76f"
+                backgroundColor="#082136" transparent="1" />
+        <widget zPosition="20" name="holdsOK" position="942,302" size="83,37"
+                font="Regular;24" halign="right" foregroundColor="#01f76f"
+                backgroundColor="#082136" transparent="1" />
+        <widget zPosition="20" name="hddOK" position="942,356" size="83,37"
+                font="Regular;24" halign="right" foregroundColor="#01f76f"
+                backgroundColor="#082136" transparent="1" />
+
+        <!-- backup -->
+        <widget zPosition="20" name="targetSlot" position="210,518" size="330,36"
+                font="Regular;25" foregroundColor="#f4f8fb"
+                backgroundColor="#092b45" transparent="1" />
+        <!-- r16: clear separation between backup button and progress area -->
+        <widget zPosition="25" name="progressTitle" position="125,646" size="590,23"
+                font="Regular;18" foregroundColor="#d8edf8"
+                backgroundColor="#082136" transparent="1" />
+        <widget zPosition="25" name="backupProgress" position="125,672" size="590,28"
+                backgroundColor="#25465c" foregroundColor="#00dfff"
+                borderWidth="1" borderColor="#71cdea" />
+        <!-- percentage is centered directly on top of the progress bar -->
+        <widget zPosition="30" name="progressPercent" position="125,670" size="590,31"
+                font="Regular;20" halign="center" valign="center" foregroundColor="#f4f8fb"
+                backgroundColor="#082136" transparent="1" />
+        <widget zPosition="25" name="backupStatus" position="125,704" size="590,20"
+                font="Regular;15" foregroundColor="#ffd400"
+                backgroundColor="#082136" transparent="1" />
+
+        <!-- r19: the baked-in static update artwork was removed from background.png.
+             This is now the ONE dynamic button, so enabled/disabled states can never overlap. -->
+        <widget zPosition="30" name="updateButton" position="937,512" size="610,58"
+                font="Regular;29" halign="center" valign="center"
+                foregroundColor="#f4f8fb" backgroundColor="#29465a"
+                borderWidth="2" borderColor="#71cdea" />
+        <widget zPosition="30" name="updateHint" position="950,576" size="585,28"
+                font="Regular;17" halign="center" valign="center" foregroundColor="#b8d6e8"
+                backgroundColor="#082136" transparent="1" />
+
+        <!-- holdLine intentionally not rendered: approved checkbox/text stays untouched -->
+
+        <!-- live output -->
+        <widget zPosition="20" name="log" position="69,790" size="1068,166"
+                font="C

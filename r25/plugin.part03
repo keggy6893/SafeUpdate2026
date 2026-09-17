@@ -1,0 +1,237 @@
+ource == current_slot() and target is not None:
+            try:
+                target = int(target)
+                info = compatible_startup_slots().get(target)
+                mp = ensure_full_mount(False)
+                if info and mp:
+                    dst = os.path.join(mp, info["rootsubdir"])
+                    valid = (
+                        os.path.isdir(dst) and
+                        os.path.isfile(os.path.join(dst, "zImage")) and
+                        os.path.isfile(os.path.join(dst, "etc", "image-version")) and
+                        os.path.exists(os.path.join(dst, "sbin", "init")) and
+                        os.path.isfile(os.path.join(dst, "usr", "bin", "enigma2"))
+                    )
+            except Exception:
+                valid = False
+
+        if valid:
+            self.backup_verified = True
+            self.verified_backup_slot = target
+            self["targetSlot"].setText("Slot %s – VERIFIZIERT ✓" % target)
+            self.set_backup_progress(100, "Backup-Fortschritt – Fertig", "Status: Backup in Slot %s verifiziert." % target)
+            created = (st.get("created") or "?").split(" ")[0]
+            self["rollback"].setText("Backup-Slot:  %s\nQuelle:       Slot %s\nErstellt:     %s" % (target, source, created))
+            self.append_log("> Gespeichertes Backup erneut geprüft: Slot %s OK." % target)
+        elif st.get("verified"):
+            self.backup_verified = False
+            self.verified_backup_slot = None
+            self.set_backup_progress(0, "Backup-Fortschritt", "Status: Gespeichertes Backup fehlt – Update gesperrt.")
+            self["rollback"].setText("Noch kein gültiges Backup vorhanden.")
+            self.append_log("> Alter Backup-Status verworfen: Backup physisch nicht mehr verifizierbar.")
+            try:
+                st["verified"] = False
+                st["invalidated"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+                save_state(st)
+            except Exception:
+                pass
+
+    def paint_update_state(self):
+        """Use the baked enabled button artwork; dynamic widget is only the disabled overlay."""
+        try:
+            self["updateHint"].show()
+            if self.backup_verified:
+                # The enabled button is part of background.png so it is pixel-identical
+                # in style to BACKUP JETZT ANLEGEN. Hide the grey dynamic overlay.
+                self["updateButton"].hide()
+                self["updateHint"].setText("Backup verifiziert – Update freigegeben")
+                try:
+                    self["updateHint"].instance.setForegroundColor(parseColor("#55e8ff"))
+                except Exception:
+                    pass
+            else:
+                self["updateButton"].setText("OPENATV UPDATE STARTEN")
+                self["updateButton"].show()
+                self["updateHint"].setText("Wird nach erfolgreichem Backup freigeschaltet.")
+                try:
+                    self["updateButton"].instance.setBackgroundColor(parseColor("#29465a"))
+                    self["updateButton"].instance.setForegroundColor(parseColor("#a9bdca"))
+                    self["updateHint"].instance.setForegroundColor(parseColor("#b8d6e8"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def connect_container(self, data_cb, close_cb):
+        self.container = eConsoleAppContainer()
+        try:
+            self.container.dataAvail.append(data_cb)
+            self.container.appClosed.append(close_cb)
+        except Exception:
+            self.container.dataAvail.connect(data_cb)
+            self.container.appClosed.connect(close_cb)
+
+    def start_backup(self):
+        if self.busy:
+            return
+        # A verified backup stays visible after success. When the user explicitly
+        # starts another backup, switch the field back to the selected free target.
+        if self.backup_verified and self.slots:
+            self["targetSlot"].setText("Slot %d – FREI" % self.slots[self.slot_index])
+
+        if not self.slots:
+            self.session.open(
+                MessageBox,
+                "Kein eindeutig verifizierter freier Multiboot-Slot verfügbar.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        # Selected target from the last verified scan.
+        if self.slot_index < 0 or self.slot_index >= len(self.slots):
+            self.refresh_slots()
+            return
+
+        target = self.slots[self.slot_index]
+        source = current_slot()
+
+        # SECURITY CHECK #1:
+        # Re-scan immediately before doing anything writable. Never trust the
+        # slot list from screen startup because another tool may have changed it.
+        latest_free = free_slots()
+        if target not in latest_free:
+            self.append_log("> ABBRUCH: Zielslot %d ist nicht mehr verifiziert frei." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Zielslot %d ist nicht mehr eindeutig frei.\\n\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if source is None:
+            self.append_log("> ABBRUCH: Aktiver Quellslot nicht eindeutig erkannt.")
+            self.session.open(
+                MessageBox,
+                "Aktiver Quellslot konnte nicht eindeutig erkannt werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        target_info = compatible_startup_slots().get(target)
+        if not target_info:
+            self.append_log("> ABBRUCH: STARTUP_%d ist nicht kompatibel." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "STARTUP_%d ist nicht sicher für dieses Backup nutzbar.\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        # Switch/create the full view as writable only now, immediately before
+        # the confirmed backup flow.
+        mp = ensure_full_mount(True)
+        if not mp:
+            self.append_log("> ABBRUCH: Vollständiger Multiboot-Mount nicht schreibbar.")
+            self.session.open(
+                MessageBox,
+                "Multiboot-Datenträger konnte nicht sicher schreibbar geöffnet werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        src = active_source_path(mp)
+        dst = os.path.join(mp, target_info["rootsubdir"])
+
+        # SECURITY CHECK #2:
+        # Re-check source and target on the actual writable full mount.
+        if not src or not os.path.isdir(src):
+            self.append_log("> ABBRUCH: Quellpfad fehlt: %s" % (src or "?"))
+            self.session.open(
+                MessageBox,
+                "Quellslot konnte im vollständigen Multiboot-Dateisystem nicht verifiziert werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if not os.path.isfile(os.path.join(src, "zImage")) or not os.path.isfile(os.path.join(src, "etc", "image-version")):
+            self.append_log("> ABBRUCH: Quellslot %d ist unvollständig." % source)
+            self.session.open(
+                MessageBox,
+                "Quellslot %d ist nicht vollständig verifizierbar.\\n"
+                "Es wurde nichts verändert." % source,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if os.path.lexists(dst) and not is_strictly_empty_dir(dst):
+            self.append_log("> ABBRUCH: Zielpfad existiert bereits: %s" % dst)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Zielslot %d ist nicht mehr frei.\n\n"
+                "Es wurde nichts überschrieben." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+        if is_strictly_empty_dir(dst):
+            self.append_log("> Leerer OpenATV-Rest in Slot %d erkannt (wird erst nach Bestätigung entfernt)." % target)
+
+        # STARTUP_N itself must still exist and remain valid. It is never
+        # overwritten by SafeUpdate2026; it defines which slots the box offers.
+        live_target_info = parse_startup_text(
+            target,
+            read_text(target_info["path"]),
+            target_info["path"]
+        )
+        if not live_target_info or not same_device(live_target_info["root_device"], root_device()):
+            self.append_log("> ABBRUCH: STARTUP_%d änderte sich während der Prüfung." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Die Bootdefinition von Slot %d ist nicht mehr eindeutig.\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        # Space check before the confirmation dialog.
+        source_bytes = tree_size_bytes(src)
+        free_bytes = filesystem_free_bytes(mp)
+        reserve = 64 * 1024 * 1024
+        if source_bytes <= 0 or free_bytes <= 0:
+            self.append_log("> ABBRUCH: Speicherbedarf konnte nicht sicher geprüft werden.")
+            self.session.open(
+                MessageBox,
+                "Freier Speicher bzw. Backup-Größe konnte nicht sicher ermittelt werden.\\n"
+                "Backup bleibt gesperrt.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if free_bytes < source_bytes + reserve:
+            self.append_log("> ABBRUCH: Nicht genug freier Speicher für Slot %d." % target)
+            self.session.open(
+                MessageBox,
+                "Nicht genug freier Speicher für ein vollständiges Backup.\\n\\n"
+                "Benötigt: ca. %d MB + 64 MB Reserve\\n"
+                "Frei: ca. %d MB" % (
+                    source_bytes // (1024 * 1024),
+                    free_bytes // (1024 * 1024)
+                ),
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        self.append_log("> Quelle verifiziert: Slot %d" % source)
+        self.append_log("> Ziel verifiziert frei: Slot %d" % target)
+        self.append_log("> STARTUP_%d: OK (wird nicht verändert)" % target)
+
+        self.session.openWithCallback(
+            lambda yes: self.do_backup(yes, source, 

@@ -1,0 +1,389 @@
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+
+import os
+import re
+import json
+import hashlib
+import subprocess
+import glob
+from datetime import datetime
+
+from Plugins.Plugin import PluginDescriptor
+from Screens.Screen import Screen
+from Screens.MessageBox import MessageBox
+from Components.Label import Label
+from Components.ActionMap import ActionMap
+from Components.ProgressBar import ProgressBar
+from enigma import eConsoleAppContainer, eTimer, ePoint
+from skin import parseColor
+
+PLUGIN_NAME = "Safe Update 2026"
+PLUGIN_VERSION = "2026.1-r25"
+
+KEXEC_DEVICE = "/dev/mmcblk0p6"
+KEXEC_SIZE = 6483040
+KEXEC_GOOD_HASH = "361e9dfddcc4e23ec566608ddf22778779256919728b53b00d244466071b2cdf"
+
+KERNEL_PACKAGES = (
+    "kernel-4.1.45-1.17",
+    "kernel-image-4.1.45-1.17",
+    "kernel-image-zimage-4.1.45-1.17",
+)
+
+FULL_MOUNT = "/tmp/safeupdate2026-full"
+STATE_FILE = "/etc/enigma2/safeupdate2026.json"
+LOG_FILE = "/tmp/safeupdate2026.log"
+
+
+def read_text(path, default=""):
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except Exception:
+        return default
+
+
+def run_cmd(args):
+    try:
+        return subprocess.check_output(args, stderr=subprocess.STDOUT).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def image_info():
+    data = {}
+    for line in read_text("/etc/image-version").splitlines():
+        if "=" in line:
+            key, val = line.split("=", 1)
+            data[key.strip()] = val.strip()
+    return data
+
+
+def cmdline():
+    return read_text("/proc/cmdline").strip()
+
+
+def cmd_value(name, text=None):
+    c = cmdline() if text is None else str(text)
+    m = re.search(r"(?:^|\s)%s=([^\s]+)" % re.escape(name), c)
+    return m.group(1) if m else ""
+
+
+def current_slot():
+    sub = cmd_value("rootsubdir")
+    m = re.search(r"(?:^|/)linuxrootfs(\d+)$", sub)
+    if m:
+        return int(m.group(1))
+
+    kern = cmd_value("kernel")
+    m = re.search(r"(?:^|/)linuxrootfs(\d+)/zImage$", kern)
+    return int(m.group(1)) if m else None
+
+
+def root_spec():
+    return cmd_value("root")
+
+
+def resolve_root_spec(spec):
+    spec = (spec or "").strip()
+    if not spec:
+        return ""
+
+    if spec.startswith("/dev/"):
+        return os.path.realpath(spec)
+
+    if spec.startswith("UUID="):
+        return os.path.realpath(run_cmd(["blkid", "-U", spec[5:]]).strip())
+
+    if spec.startswith("LABEL="):
+        return os.path.realpath(run_cmd(["blkid", "-L", spec[6:]]).strip())
+
+    if spec.startswith("PARTUUID="):
+        out = run_cmd(["blkid", "-t", "PARTUUID=%s" % spec[9:], "-o", "device"]).strip()
+        return os.path.realpath(out)
+
+    return ""
+
+
+def root_device():
+    return resolve_root_spec(root_spec())
+
+
+def active_rootsubdir():
+    raw = cmd_value("rootsubdir").strip().strip("/")
+    if not raw:
+        return ""
+    norm = os.path.normpath(raw)
+    if norm == ".." or norm.startswith("../"):
+        return ""
+    return norm
+
+
+def safe_rootsubdir(raw, slot):
+    raw = (raw or "").strip().strip("/")
+    if not raw:
+        return ""
+    norm = os.path.normpath(raw)
+    if norm == ".." or norm.startswith("../"):
+        return ""
+    if norm != raw:
+        return ""
+    m = re.search(r"(?:^|/)linuxrootfs(\d+)$", norm)
+    if not m or int(m.group(1)) != int(slot):
+        return ""
+    return norm
+
+
+def parse_startup_text(slot, text, path=""):
+    root = ""
+    rootsubdir = ""
+    kernel = ""
+
+    m = re.search(r"(?:^|\s)root=([^\s]+)", text or "")
+    if m:
+        root = m.group(1)
+
+    m = re.search(r"(?:^|\s)rootsubdir=([^\s]+)", text or "")
+    if m:
+        rootsubdir = m.group(1)
+
+    m = re.search(r"(?:^|\s)kernel=([^\s]+)", text or "")
+    if m:
+        kernel = m.group(1)
+
+    rootsubdir = safe_rootsubdir(rootsubdir, slot)
+    if not root or not rootsubdir or not kernel:
+        return None
+
+    # Fail closed: this backup method is only safe when the slot's STARTUP
+    # points its kernel into the same linuxrootfsN tree that will be cloned.
+    kernel_norm = os.path.normpath(kernel.strip().lstrip("/"))
+    expected_kernel = os.path.join(rootsubdir, "zImage")
+    if kernel_norm != expected_kernel:
+        return None
+
+    dev = resolve_root_spec(root)
+    if not dev:
+        return None
+
+    return {
+        "slot": int(slot),
+        "path": path,
+        "root_spec": root,
+        "root_device": dev,
+        "rootsubdir": rootsubdir,
+        "kernel": kernel,
+    }
+
+
+def startup_slots():
+    result = {}
+    for path in sorted(glob.glob("/boot/STARTUP_*")):
+        base = os.path.basename(path)
+        m = re.match(r"^STARTUP_(\d+)$", base)
+        if not m:
+            continue
+        slot = int(m.group(1))
+        info = parse_startup_text(slot, read_text(path), path)
+        if info is not None:
+            result[slot] = info
+    return result
+
+
+def same_device(a, b):
+    a = os.path.realpath(a or "")
+    b = os.path.realpath(b or "")
+    return bool(a and b and a == b)
+
+
+def _decode_mount_field(value):
+    return (value
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\"))
+
+
+def mount_entries():
+    rows = []
+    for line in read_text("/proc/mounts").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        rows.append({
+            "source": _decode_mount_field(parts[0]),
+            "mountpoint": _decode_mount_field(parts[1]),
+            "fstype": parts[2],
+            "options": parts[3].split(","),
+        })
+    return rows
+
+
+def _full_mount_is_valid(mountpoint):
+    sub = active_rootsubdir()
+    if not mountpoint or not sub:
+        return False
+    src = os.path.join(mountpoint, sub)
+    return (
+        os.path.isdir(src) and
+        os.path.isfile(os.path.join(src, "zImage")) and
+        os.path.isfile(os.path.join(src, "etc", "image-version"))
+    )
+
+
+def _mount_entry_for_path(path):
+    path = os.path.realpath(path)
+    for row in mount_entries():
+        if os.path.realpath(row["mountpoint"]) == path:
+            return row
+    return None
+
+
+def _device_mount_profile(dev):
+    fstype = ""
+    rw_mounted = False
+    for row in mount_entries():
+        if not same_device(row.get("source"), dev):
+            continue
+        if not fstype and row.get("fstype"):
+            fstype = row.get("fstype")
+        if "rw" in row.get("options", []):
+            rw_mounted = True
+    return fstype, rw_mounted
+
+
+def ensure_full_mount(writable=False):
+    """Return a verified full-filesystem view of the active multiboot device."""
+    dev = root_device()
+    sub = active_rootsubdir()
+    if not dev or not sub:
+        return ""
+
+    if os.path.ismount(FULL_MOUNT):
+        row = _mount_entry_for_path(FULL_MOUNT)
+        if not row or not same_device(row["source"], dev) or not _full_mount_is_valid(FULL_MOUNT):
+            return ""
+        if writable and "ro" in row["options"]:
+            if subprocess.call(["mount", "-o", "remount,rw", FULL_MOUNT]) != 0:
+                return ""
+        return FULL_MOUNT
+
+    for row in mount_entries():
+        if not same_device(row["source"], dev):
+            continue
+        mp = row["mountpoint"]
+        if not _full_mount_is_valid(mp):
+            continue
+        if writable and "ro" in row["options"]:
+            continue
+        return mp
+
+    try:
+        if not os.path.isdir(FULL_MOUNT):
+            os.makedirs(FULL_MOUNT)
+    except Exception:
+        return ""
+
+    # KEXEC rootsubdir systems often have this same device already mounted rw
+    # as '/'. A second ro mount can fail with EBUSY, so discovery uses the same
+    # rw mode if needed. Merely mounting rw does not change files.
+    fstype, dev_rw = _device_mount_profile(dev)
+    mode = "rw" if (writable or dev_rw) else "ro"
+    args = ["mount"]
+    if fstype:
+        args += ["-t", fstype]
+    args += ["-o", mode, dev, FULL_MOUNT]
+    if subprocess.call(args) != 0:
+        return ""
+
+    if not _full_mount_is_valid(FULL_MOUNT):
+        try:
+            subprocess.call(["umount", FULL_MOUNT])
+        except Exception:
+            pass
+        return ""
+    return FULL_MOUNT
+
+
+def active_source_path(mountpoint=None):
+    mp = mountpoint or ensure_full_mount(False)
+    sub = active_rootsubdir()
+    if not mp or not sub:
+        return ""
+    return os.path.join(mp, sub)
+
+
+def compatible_startup_slots():
+    dev = root_device()
+    result = {}
+    if not dev:
+        return result
+    for slot, info in startup_slots().items():
+        if same_device(info.get("root_device"), dev):
+            result[slot] = info
+    return result
+
+
+def slot_path(slot, mountpoint=None):
+    info = compatible_startup_slots().get(int(slot))
+    if not info:
+        return ""
+    mp = mountpoint or ensure_full_mount(False)
+    if not mp:
+        return ""
+    return os.path.join(mp, info["rootsubdir"])
+
+
+def is_strictly_empty_dir(path):
+    try:
+        return os.path.isdir(path) and not os.path.islink(path) and len(os.listdir(path)) == 0
+    except Exception:
+        return False
+
+
+def slot_is_verified_free(info, mountpoint):
+    if not info or not mountpoint:
+        return False
+    path = os.path.join(mountpoint, info["rootsubdir"])
+    # OpenATV Delete can leave an empty linuxrootfsN directory behind.
+    # Only a completely empty real directory is reusable; partial images stay blocked.
+    return (not os.path.lexists(path)) or is_strictly_empty_dir(path)
+
+
+def free_slots():
+    """
+    A slot is offered only when:
+    - a numeric /boot/STARTUP_N exists and passes strict validation,
+    - it belongs to the same multiboot root device as the running slot,
+    - the running slot is verifiably visible in a full-filesystem view,
+    - the target linuxrootfsN path does not exist, or is a strictly empty OpenATV delete-remnant.
+    """
+    active = current_slot()
+    mp = ensure_full_mount(False)
+    if active is None or not mp:
+        return []
+
+    src = active_source_path(mp)
+    if not src or not os.path.isdir(src):
+        return []
+
+    result = []
+    for slot, info in sorted(compatible_startup_slots().items()):
+        if slot == active:
+            continue
+        if slot_is_verified_free(info, mp):
+            result.append(slot)
+    return result
+
+
+def tree_size_bytes(path):
+    try:
+        out = subprocess.check_output(["du", "-sk", path], stderr=subprocess.STDOUT)
+        kb = int(out.decode("utf-8", "replace").split()[0])
+        return kb * 1024
+    except Exception:
+        return 0
+
+
+def filesystem_free_bytes(path):

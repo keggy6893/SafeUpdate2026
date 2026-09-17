@@ -1,0 +1,209 @@
+target, src, dst, source_bytes),
+            MessageBox,
+            "Backup von Slot %d nach Slot %d anlegen?\\n\\n"
+            "Der Zielslot wurde unmittelbar vorher zweimal geprüft.\\n"
+            "Bestehende Slots werden niemals überschrieben." % (source, target),
+            MessageBox.TYPE_YESNO,
+        )
+
+    def do_backup(self, yes, source, target, src, dst, source_bytes):
+        if not yes:
+            return
+
+        # Final race check after the user's confirmation.
+        if os.path.lexists(dst):
+            if is_strictly_empty_dir(dst):
+                try:
+                    os.rmdir(dst)
+                    self.append_log("> Leeren Slot-Rest %d sicher entfernt." % target)
+                except Exception:
+                    self.append_log("> ABBRUCH: Leerer Zielrest konnte nicht entfernt werden.")
+                    return
+            else:
+                self.append_log("> ABBRUCH: Zielslot %d wurde zwischenzeitlich belegt." % target)
+                self.refresh_slots()
+                self.session.open(
+                    MessageBox,
+                    "Zielslot %d ist inzwischen nicht mehr frei.\n"
+                    "Es wurde nichts überschrieben." % target,
+                    MessageBox.TYPE_ERROR
+                )
+                return
+
+        self.busy = True
+        self.backup_verified = False
+        self.paint_update_state()
+        self.backup_total_bytes = int(source_bytes or 0)
+        self.backup_dst = dst
+        self.set_backup_progress(3, "Backup-Fortschritt – Prüfen", "Status: Backup wird vorbereitet ...")
+        try:
+            self.progress_timer.start(1500, False)
+        except Exception:
+            pass
+        self.append_log("> Backup Slot %d -> Slot %d startet..." % (source, target))
+
+        script = """
+set -e
+SRC={src}
+DST={dst}
+
+test -d "$SRC"
+test -f "$SRC/zImage"
+test -f "$SRC/etc/image-version"
+test ! -e "$DST"
+
+echo 'Zielslot ist weiterhin frei.'
+mkdir "$DST"
+
+echo 'Synchronisiere Dateisystem...'
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$DST"/
+sync
+
+test -f "$DST/zImage"
+test -f "$DST/etc/image-version"
+
+SRC_HASH=$(sha256sum "$SRC/zImage" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST/zImage" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+
+echo 'BACKUP_VERIFIED'
+""".format(src=shq(src), dst=shq(dst))
+
+        self.pending_backup = (source, target, dst)
+        self.connect_container(self.backup_data, self.backup_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+
+    def backup_data(self, data):
+        try:
+            txt = data.decode("utf-8", "replace")
+        except Exception:
+            txt = str(data)
+        for line in txt.splitlines():
+            self.append_log("> " + line)
+            low = line.lower()
+            if "zielslot ist weiterhin frei" in low:
+                self.set_backup_progress(max(self.progress_value, 6), "Backup-Fortschritt – Prüfen", "Status: Zielslot geprüft ...")
+            elif "synchronisiere dateisystem" in low:
+                self.set_backup_progress(max(self.progress_value, 8), "Backup-Fortschritt – Vorbereiten", "Status: Dateisystem wird synchronisiert ...")
+            elif "kopiere image" in low:
+                self.set_backup_progress(max(self.progress_value, 10), "Backup-Fortschritt – Kopieren", "Status: Kopiere aktuelles Image ...")
+            elif "quelle zimage" in low or "backup zimage" in low:
+                self.set_backup_progress(max(self.progress_value, 95), "Backup-Fortschritt – Verifizieren", "Status: Prüfe Kernel und Integrität ...")
+            elif "backup_verified" in low:
+                self.set_backup_progress(99, "Backup-Fortschritt – Verifizieren", "Status: Abschlussprüfung ...")
+
+    def backup_closed(self, rc):
+        try:
+            self.progress_timer.stop()
+        except Exception:
+            pass
+        self.busy = False
+        source, target, dst = self.pending_backup
+        verified = rc == 0 and os.path.isfile(os.path.join(dst, "zImage")) and os.path.isfile(os.path.join(dst, "etc", "image-version"))
+        if verified:
+            self.backup_verified = True
+            self.verified_backup_slot = target
+            created = datetime.now().strftime("%d.%m.%Y %H:%M")
+            save_state({"source_slot": source, "target_slot": target, "created": created, "verified": True, "build": image_info().get("build", "")})
+            self.set_backup_progress(100, "Backup-Fortschritt – Fertig", "Status: Backup in Slot %d erfolgreich verifiziert." % target)
+            self["rollback"].setText("Backup-Slot:  %d\nQuelle:       Slot %d\nErstellt:     %s" % (target, source, created.split(" ")[0]))
+            self.append_log("> Backup verifiziert. Update freigegeben.")
+            self.refresh_slots()
+            self["targetSlot"].setText("Slot %d – VERIFIZIERT ✓" % target)
+            self.nav_focus = 6
+            self.last_action_focus = 6
+            self.paint_nav_focus()
+        else:
+            self.set_backup_progress(self.progress_value, "Backup-Fortschritt – FEHLER", "Status: Backup FEHLGESCHLAGEN – Zielslot nicht verwenden.")
+            self.append_log("> FEHLER: Backup nicht verifiziert.")
+            self.session.open(MessageBox, "Backup konnte nicht verifiziert werden.\nDer Zielslot wurde NICHT automatisch gelöscht.", MessageBox.TYPE_ERROR)
+        self.paint_update_state()
+        self.backup_dst = ""
+        self.backup_total_bytes = 0
+
+    def start_update(self):
+        if self.busy:
+            return
+        if not self.backup_verified:
+            self.session.open(MessageBox, "Update bleibt gesperrt, bis ein Backup erfolgreich verifiziert wurde.", MessageBox.TYPE_INFO)
+            return
+        if not kexec_ok():
+            self.session.open(MessageBox, "KEXEC-Kernel ist nicht korrekt. Update wird blockiert.", MessageBox.TYPE_ERROR)
+            return
+        if not holds_ok():
+            self.session.open(MessageBox, "Nicht alle Kernel-Pakete stehen auf HOLD. Update wird blockiert.", MessageBox.TYPE_ERROR)
+            return
+        self.session.openWithCallback(self.do_update, MessageBox, "Backup ist verifiziert.\n\nOpenATV jetzt mit opkg update && opkg upgrade aktualisieren?", MessageBox.TYPE_YESNO)
+
+    def do_update(self, yes):
+        if not yes:
+            return
+        self.busy = True
+        self.append_log("> opkg update")
+        hold_cmd = "; ".join("opkg flag hold %s >/dev/null 2>&1 || true" % shq(p) for p in KERNEL_PACKAGES)
+        cmd = "set -e; %s; opkg update; echo __SAFEUPDATE_UPGRADE__; opkg upgrade" % hold_cmd
+        self.connect_container(self.update_data, self.update_closed)
+        self.container.execute("/bin/sh -c %s" % shq(cmd))
+
+    def update_data(self, data):
+        try:
+            txt = data.decode("utf-8", "replace")
+        except Exception:
+            txt = str(data)
+        for line in txt.splitlines():
+            if line == "__SAFEUPDATE_UPGRADE__":
+                self.append_log("> opkg upgrade")
+            else:
+                self.append_log("> " + line[:120])
+
+    def update_closed(self, rc):
+        self.busy = False
+        self.append_log("> Update-Prozess beendet. RC=%s" % rc)
+        guard_ok = True
+        if os.path.isfile("/usr/local/sbin/kexec-guard.sh"):
+            guard_ok = subprocess.call(["/usr/local/sbin/kexec-guard.sh"]) == 0
+        self.refresh_status()
+        if rc == 0 and guard_ok and kexec_ok():
+            self.append_log("> Sicherheitsprüfung: OK")
+            self.session.open(MessageBox, "Update abgeschlossen.\nKEXEC-Schutz ist weiterhin OK.\n\nNeustart bitte anschließend manuell ausführen.", MessageBox.TYPE_INFO)
+        else:
+            self.append_log("> WARNUNG: Update/Sicherheitsprüfung nicht sauber beendet.")
+            self.session.open(MessageBox, "Update oder Sicherheitsprüfung meldet einen Fehler.\nBitte NICHT neu starten, bevor die Details geprüft wurden.", MessageBox.TYPE_ERROR)
+
+    def show_details(self):
+        info = image_info()
+        st = load_state()
+        text = (
+            "%s %s\n\n"
+            "Aktueller Slot: %s\n"
+            "Image: %s\n"
+            "Build: %s\n"
+            "Root: %s\n\n"
+            "KEXEC: %s\n"
+            "Kernel-HOLDs: %s\n"
+            "HDD /media/usb: %s\n"
+            "Verifiziert freie Slots: %s\n\n"
+            "Letztes Backup: %s"
+        ) % (
+            PLUGIN_NAME, PLUGIN_VERSION,
+            current_slot() if current_slot() is not None else "?",
+            info.get("version", "?"), info.get("build", "?"), root_device() or "?",
+            "OK" if kexec_ok() else "FEHLER", "OK" if holds_ok() else "FEHLER", "OK" if hdd_ok() else "FEHLER",
+            ", ".join(str(x) for x in self.slots) or "keine", st.get("created", "keins")
+        )
+        self.session.open(MessageBox, text, MessageBox.TYPE_INFO)
+
+
+def main(session, **kwargs):
+    session.open(SafeUpdateScreen)
+
+
+def Plugins(**kwargs):
+    return [
+        PluginDescriptor(name=PLUGIN_NAME, description="Backup + sicheres OpenATV Update für KEXEC-Multiboot", where=PluginDescriptor.WHERE_PLUGINMENU, fnc=main),
+        PluginDescriptor(name=PLUGIN_NAME, description="Backup + sicheres OpenATV Update für KEXEC-Multiboot", where=PluginDescriptor.WHERE_EXTENSIONSMENU, fnc=main),
+    ]
