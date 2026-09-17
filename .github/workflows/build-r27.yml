@@ -34,8 +34,9 @@ jobs:
           test "$(sha256sum SafeUpdate2026/background_vu_duo4kse.png | awk '{print $1}')" = "bbc86893002abf155840577d8b02ce907e408436dd6882b43b6c9d6d7c417739"
 
           python3 - <<'PY'
-          import base64, zlib, pathlib
-          src = pathlib.Path("$GITHUB_WORKSPACE/.r27-src/plugin.zlib.b64")
+          import base64, os, pathlib, zlib
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          src = workspace / ".r27-src" / "plugin.zlib.b64"
           out = pathlib.Path("SafeUpdate2026/plugin.py")
           out.write_bytes(zlib.decompress(base64.b64decode(src.read_text().strip())))
           PY
