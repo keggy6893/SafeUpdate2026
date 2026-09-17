@@ -1,0 +1,139 @@
+name: Release SafeUpdate2026 r33
+
+on:
+  push:
+    branches: [r33-dev]
+    paths:
+      - '.r33-release-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  release-r33:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify dev3 and build final r33
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED="$(python3 - <<'PY'
+          import json
+          print(json.load(open('latest-r33-test.json', encoding='utf-8'))['sha256'])
+          PY
+          )"
+          ACTUAL="$(sha256sum SafeUpdate2026_2026.1-r33-dev3.zip | awk '{print $1}')"
+          [ "$EXPECTED" = "$ACTUAL" ] || { echo 'dev3 SHA mismatch'; exit 1; }
+
+          rm -rf /tmp/r33final
+          mkdir -p /tmp/r33final
+          unzip -q SafeUpdate2026_2026.1-r33-dev3.zip -d /tmp/r33final
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/r33final/SafeUpdate2026/plugin.py')
+          s=p.read_text(encoding='utf-8')
+          old='PLUGIN_VERSION = "2026.1-r33-dev3"'
+          new='PLUGIN_VERSION = "2026.1-r33"'
+          if s.count(old) != 1:
+              raise SystemExit('unexpected final version marker count: %d' % s.count(old))
+          p.write_text(s.replace(old,new,1), encoding='utf-8')
+          r=Path('/tmp/r33final/SafeUpdate2026/README.txt')
+          text=r.read_text(encoding='utf-8') if r.exists() else ''
+          text=text.replace('SafeUpdate2026 2026.1-r33-dev3','SafeUpdate2026 2026.1-r33',1)
+          text=text.replace('Sicherer r33-Releasekandidat','SafeUpdate2026 r33',1)
+          r.write_text(text, encoding='utf-8')
+          PY
+
+          python3 -m py_compile /tmp/r33final/SafeUpdate2026/plugin.py
+          rm -rf /tmp/r33final/SafeUpdate2026/__pycache__
+          find /tmp/r33final/SafeUpdate2026 -name '*.pyc' -delete 2>/dev/null || true
+
+          python3 - <<'PY'
+          import ast, pathlib, time
+          p=pathlib.Path('/tmp/r33final/SafeUpdate2026/plugin.py')
+          s=p.read_text(encoding='utf-8')
+          tree=ast.parse(s)
+          funcs={n.name:n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
+          classes={n.name for n in ast.walk(tree) if isinstance(n,ast.ClassDef)}
+          required={
+              'rotation_layout_supported','rotation_layout_name','rotation_status_text','_rotation_seed',
+              'ensure_rotation_state','physically_verified_rotation_state','persist_rotation_state',
+              'post_update_rotation_delay','rotation_sessionstart','get_rotation_service',
+              'validate_internal_backup_state','discover_internal_backups','start_internal_backup',
+              'restore_internal_backup','gigablue_kernel_layout_ok','expected_kernel_device',
+              'paint_update_state','start_update'
+          }
+          missing=sorted(required-set(funcs))
+          if missing: raise SystemExit('missing final functions: %s' % ', '.join(missing))
+          if 'SafeUpdateRotationService' not in classes: raise SystemExit('rotation service missing')
+          markers=[
+              'PLUGIN_VERSION = "2026.1-r33"',
+              'UPDATE GESPERRT – BACKUP LÄUFT',
+              'ROTATION_VERIFIED',
+              'Auto-Rotation NICHT VERFÜGBAR',
+              'enabled = bool(enabled and rotation_layout_supported())',
+              'session is not None and rotation_layout_supported()',
+              'Normales Backup, Update, Killswitch und Rollback bleiben verfügbar.',
+              'KILLSWITCH blockiert','9 = WIEDERHERSTELLEN',
+              're.match(r"^STARTUP_(\\d+)$", base)'
+          ]
+          for m in markers:
+              if m not in s: raise SystemExit('missing final marker: %r' % m)
+
+          # Gate truth table.
+          gate=funcs['rotation_layout_supported']
+          code=compile(ast.Module(body=[gate], type_ignores=[]),'<gate>','exec')
+          for vu,gb,expected in ((True,False,True),(False,True,True),(False,False,False)):
+              ns={'_USE_CLASSIC_VU_DUO4KSE':vu,'is_gbtrio4k':(lambda value=gb:value)}
+              exec(code,ns)
+              assert ns['rotation_layout_supported']() is expected
+
+          # Unknown receiver cannot seed a timer-enabled state.
+          seed=funcs['_rotation_seed']
+          code=compile(ast.Module(body=[seed], type_ignores=[]),'<seed>','exec')
+          ns={'time':time,'current_system_fingerprint':lambda:'fp','rotation_layout_supported':lambda:False,'ROTATION_INTERVAL':86400}
+          exec(code,ns)
+          out=ns['_rotation_seed']({'verified':True},True,'fp',100)
+          assert out['rotation_enabled'] is False and out['rotation_next_due']==0
+
+          # Worker gate precedes physical backup discovery.
+          cls=next(n for n in ast.walk(tree) if isinstance(n,ast.ClassDef) and n.name=='SafeUpdateRotationService')
+          check=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='check')
+          csrc=ast.get_source_segment(s,check)
+          assert csrc.index('if not rotation_layout_supported():') < csrc.index('state = physically_verified_rotation_state()')
+
+          # Red update lock still precedes verified blue state.
+          screen=next(n for n in ast.walk(tree) if isinstance(n,ast.ClassDef) and n.name=='SafeUpdateScreen')
+          paint=next(n for n in screen.body if isinstance(n,ast.FunctionDef) and n.name=='paint_update_state')
+          psrc=ast.get_source_segment(s,paint)
+          assert psrc.index('if self.busy:') < psrc.index('elif self.backup_verified:')
+          print('r33 final safety tests: OK')
+          PY
+
+          rm -f SafeUpdate2026_2026.1-r33.zip
+          cd /tmp/r33final
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r33.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+          FINAL_SHA="$(sha256sum SafeUpdate2026_2026.1-r33.zip | awk '{print $1}')"
+          echo "$FINAL_SHA" > /tmp/r33-final-sha
+          python3 -c 'import json,sys; data={"version":"2026.1-r33","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r33.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("/tmp/latest-r33.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$FINAL_SHA"
+
+      - name: Publish final r33 to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf /tmp/safeupdate-main
+          git worktree add /tmp/safeupdate-main origin/main
+          cp SafeUpdate2026_2026.1-r33.zip /tmp/safeupdate-main/
+          cp /tmp/latest-r33.json /tmp/safeupdate-main/latest.json
+          cd /tmp/safeupdate-main
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add SafeUpdate2026_2026.1-r33.zip latest.json
+          git commit -m 'Release SafeUpdate2026 2026.1-r33'
+          git push origin HEAD:main
