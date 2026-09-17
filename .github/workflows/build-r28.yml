@@ -43,19 +43,6 @@ jobs:
           s = s.replace(old_screen, new_screen, 1)
           p.write_text(s, encoding='utf-8')
           compile(p.read_bytes(), str(p), 'exec')
-          Path('SafeUpdate2026/README.txt').write_text('''SafeUpdate2026 2026.1-r28
-==========================
-
-r28 - Full-HD/OpenATV scaling fix
---------------------------------
-- SafeUpdateScreen declares resolution="1920,1080" explicitly.
-- Prevents OpenATV from scaling the already-Full-HD 1920x1080 layout a second time by 1.5x.
-- Fixes clipped right and bottom areas seen on the GigaBlue test box.
-- Receiver detection and neutral GigaBlue artwork remain unchanged.
-- Backup, KEXEC, kernel-HOLD, slot, rollback and update safety logic are unchanged from r27.
-
-Tester: first open the plugin and verify the complete UI is visible before starting a backup or update.
-''', encoding='utf-8')
           PY
 
           test "$(sha256sum SafeUpdate2026/plugin.py | awk '{print $1}')" = "4f602245c7e9c35e1a34749da43c1706de3e785ff4bb71eb10db22338054e4c8"
@@ -68,15 +55,7 @@ Tester: first open the plugin and verify the complete UI is visible before start
           rm -f "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip"
           zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip" SafeUpdate2026
           SHA="$(sha256sum "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip" | awk '{print $1}')"
-          cat > "$GITHUB_WORKSPACE/latest.json" <<EOF
-          {
-            "version": "2026.1-r28",
-            "mode": "full",
-            "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r28.zip",
-            "sha256": "$SHA",
-            "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
-          }
-          EOF
+          printf '{\n  "version": "2026.1-r28",\n  "mode": "full",\n  "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r28.zip",\n  "sha256": "%s",\n  "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"\n}\n' "$SHA" > "$GITHUB_WORKSPACE/latest.json"
           echo "r28 sha256=$SHA"
 
       - name: Publish r28 and clean staging
