@@ -1,0 +1,30 @@
+name: Extract r28 source for UI diagnosis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.debug-r28-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r28src .debug-r28
+          mkdir -p /tmp/r28src .debug-r28
+          unzip -q SafeUpdate2026_2026.1-r28.zip -d /tmp/r28src
+          cp /tmp/r28src/SafeUpdate2026/plugin.py .debug-r28/plugin.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .debug-r28/plugin.py
+          git commit -m "Extract r28 plugin source for UI diagnosis"
+          git push origin HEAD:main
