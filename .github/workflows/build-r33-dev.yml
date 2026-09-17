@@ -1,0 +1,152 @@
+name: Build SafeUpdate2026 r33 dev
+
+on:
+  push:
+    branches: [r33-dev]
+    paths:
+      - '.r33-build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r33-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode, verify and build r33 dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r33build /tmp/r33decoded
+          mkdir -p /tmp/r33build /tmp/r33decoded
+
+          cat .r33-src/plugin.part* > /tmp/r33decoded/plugin.b64
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, zlib
+          src = pathlib.Path('/tmp/r33decoded/plugin.b64').read_bytes()
+          data = zlib.decompress(base64.b64decode(src))
+          expected = '026b6f8550d3f283e0dec9017671bb02f8dc6498de34443d50e1e40d1ffe524f'
+          actual = hashlib.sha256(data).hexdigest()
+          print('decoded plugin sha256:', actual)
+          if actual != expected:
+              raise SystemExit('r33 source hash mismatch')
+          pathlib.Path('/tmp/r33decoded/plugin.py').write_bytes(data)
+          PY
+          python3 -m py_compile /tmp/r33decoded/plugin.py
+
+          unzip -q SafeUpdate2026_2026.1-r32.zip -d /tmp/r33build
+          cp /tmp/r33decoded/plugin.py /tmp/r33build/SafeUpdate2026/plugin.py
+          rm -rf /tmp/r33build/SafeUpdate2026/__pycache__
+          find /tmp/r33build/SafeUpdate2026 -name '*.pyc' -delete 2>/dev/null || true
+          python3 -m py_compile /tmp/r33build/SafeUpdate2026/plugin.py
+          rm -rf /tmp/r33build/SafeUpdate2026/__pycache__
+
+          python3 - <<'PY'
+          import ast, pathlib
+          p = pathlib.Path('/tmp/r33build/SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+          tree = ast.parse(s)
+          funcs = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+
+          required_r32 = {
+              'validate_internal_backup_state', 'discover_internal_backups',
+              'start_internal_backup', 'do_internal_backup', 'internal_backup_closed',
+              'request_delete_internal_backup', 'do_delete_internal_backup', 'internal_delete_closed',
+              'restore_internal_backup', 'do_restore_internal_backup', 'restore_closed',
+              'gigablue_kernel_layout_ok', 'expected_kernel_device'
+          }
+          required_r33 = {
+              'current_system_fingerprint', 'physically_verified_rotation_state',
+              'ensure_rotation_state', 'persist_rotation_state', 'post_update_rotation_delay',
+              'get_rotation_service', 'rotation_sessionstart'
+          }
+          missing = sorted((required_r32 | required_r33) - funcs)
+          if missing:
+              raise SystemExit('missing functions: %s' % ', '.join(missing))
+          if 'SafeUpdateRotationService' not in classes:
+              raise SystemExit('SafeUpdateRotationService missing')
+
+          checks = [
+              'PLUGIN_VERSION = "2026.1-r33-dev1"',
+              'INTERNAL_BACKUP_DIRNAME = "safeupdate2026"',
+              'ROTATION_INTERVAL = 24 * 60 * 60',
+              'ROTATION_TICK_MS = 30 * 60 * 1000',
+              'GBTRIO4K_KERNEL_DEVICES',
+              'gigablue_kernel_layout_ok',
+              'KILLSWITCH blockiert',
+              'STARTUP_%d bleibt erhalten',
+              'Kein vorhandener Multiboot-Slot wird verändert.',
+              'Kein linuxrootfs-Slot, keine Kernelpartition und Recovery werden verändert.',
+              '9 = WIEDERHERSTELLEN',
+              '"7": self.force_rotation_now',
+              '"8": self.toggle_rotation',
+              'WHERE_SESSIONSTART',
+              'ROTATION_VERIFIED',
+              'Auto-Rotation: Vor-Update-Backup bleibt mindestens 24h erhalten.'
+          ]
+          for item in checks:
+              if item not in s:
+                  raise SystemExit('missing safety/rotation marker: %r' % item)
+
+          # Preserve the numeric-only STARTUP scan: Recovery must never become a backup target.
+          if 're.match(r"^STARTUP_(\\d+)$", base)' not in s:
+              raise SystemExit('numeric STARTUP filter missing')
+
+          print('r33-dev static safety checks: OK')
+          PY
+
+          cat > /tmp/r33build/SafeUpdate2026/README.txt <<'EOF'
+          SafeUpdate2026 2026.1-r33-dev1
+          ==============================
+
+          Entwicklungs-/Hardware-Teststand auf Basis von r32.
+
+          Enthalten aus r32:
+          - Multiboot-sicheres Backup vor OpenATV-Update
+          - GigaBlue UHD Trio 4K Kernel-/Slot-Schutz
+          - internes eMMC-Backup als Fallback ohne freien Slot
+          - Killswitch Taste 0
+          - Notfall-Wiederherstellung Taste 9 aus einem anderen Slot
+          - belegte Slots und Recovery werden nicht als Backup-Ziel ueberschrieben
+
+          Neu in r33-dev1:
+          - automatische Backup-Pruefung alle 24 Stunden
+          - Vollbackup nur wenn sich Image-/Paketstand geaendert hat
+          - altes verifiziertes Backup bleibt bis zur Verifikation der neuen Kopie erhalten
+          - sichere Slot-Rotation mit .safeupdate-new / .safeupdate-old
+          - GigaBlue-Rotation sichert vor dem Kernel-Tausch auch den alten Ziel-Kernel temporaer
+          - internes eMMC-Backup kann ebenfalls sicher rotiert werden
+          - Taste 7: Rotation sofort testen
+          - Taste 8: 24h-Auto-Rotation EIN/AUS
+          - Enigma2-Hintergrunddienst: Plugin muss fuer die 24h-Pruefung nicht offen bleiben
+          - nach erfolgreichem OpenATV-Update bleibt das Vor-Update-Backup mindestens 24h erhalten
+          EOF
+          sed -i 's/^          //' /tmp/r33build/SafeUpdate2026/README.txt
+
+          rm -f SafeUpdate2026_2026.1-r33-dev1.zip
+          cd /tmp/r33build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r33-dev1.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r33-dev1.zip | awk '{print $1}')"
+          echo "$SHA  SafeUpdate2026_2026.1-r33-dev1.zip" > r33-dev-sha256.txt
+          python3 -c 'import json,sys; data={"version":"2026.1-r33-dev1","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/r33-dev/SafeUpdate2026_2026.1-r33-dev1.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("latest-r33-test.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$SHA"
+
+      - name: Publish r33 dev package on test branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r33-dev1.zip latest-r33-test.json r33-dev-sha256.txt
+          if git diff --cached --quiet; then
+            echo "No package changes to commit."
+          else
+            git commit -m "Publish SafeUpdate2026 2026.1-r33-dev1 test build"
+            git push origin HEAD:r33-dev
+          fi
