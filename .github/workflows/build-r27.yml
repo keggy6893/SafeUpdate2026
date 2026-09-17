@@ -33,10 +33,12 @@ jobs:
           test "$(sha256sum SafeUpdate2026/background_generic.png | awk '{print $1}')" = "8e950f61654321cc2ed1b366a36aa4b0cafe3a6f47731cb650735e693438749a"
           test "$(sha256sum SafeUpdate2026/background_vu_duo4kse.png | awk '{print $1}')" = "bbc86893002abf155840577d8b02ce907e408436dd6882b43b6c9d6d7c417739"
 
-          cat "$GITHUB_WORKSPACE/.r27-src/plugin.part1" \
-              "$GITHUB_WORKSPACE/.r27-src/plugin.part2" \
-              "$GITHUB_WORKSPACE/.r27-src/plugin.part3" \
-              "$GITHUB_WORKSPACE/.r27-src/plugin.part4" > SafeUpdate2026/plugin.py
+          python3 - <<'PY'
+          import base64, zlib, pathlib
+          src = pathlib.Path("$GITHUB_WORKSPACE/.r27-src/plugin.zlib.b64")
+          out = pathlib.Path("SafeUpdate2026/plugin.py")
+          out.write_bytes(zlib.decompress(base64.b64decode(src.read_text().strip())))
+          PY
           cp "$GITHUB_WORKSPACE/.r27-src/README.txt" SafeUpdate2026/README.txt
           cp "$GITHUB_WORKSPACE/.r27-src/__init__.py" SafeUpdate2026/__init__.py
 
