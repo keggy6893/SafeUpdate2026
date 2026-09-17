@@ -4,7 +4,7 @@ set -u
 BASE_URL="https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main"
 META_URL="$BASE_URL/latest.json"
 TMPDIR="/tmp/safeupdate2026-install"
-ZIPFILE="$TMPDIR/base.zip"
+ZIPFILE="$TMPDIR/package.zip"
 EXTRACT="$TMPDIR/extract"
 PLUGIN_DIR="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
 BACKUP_DIR="/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026.before-install"
@@ -28,7 +28,7 @@ json_value() {
     key="$1"
     python3 - "$TMPDIR/latest.json" "$key" <<'PY'
 import json, sys
-with open(sys.argv[1], 'r') as f:
+with open(sys.argv[1], "r", encoding="utf-8") as f:
     data = json.load(f)
 value = data[sys.argv[2]]
 if isinstance(value, (dict, list)):
@@ -41,12 +41,9 @@ sha256_file() {
     python3 - "$1" <<'PY'
 import hashlib, sys
 h = hashlib.sha256()
-with open(sys.argv[1], 'rb') as f:
-    while True:
-        b = f.read(1024 * 1024)
-        if not b:
-            break
-        h.update(b)
+with open(sys.argv[1], "rb") as f:
+    for block in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(block)
 print(h.hexdigest())
 PY
 }
@@ -55,9 +52,8 @@ syntax_check() {
     python3 - "$1" <<'PY'
 import sys
 p = sys.argv[1]
-with open(p, 'rb') as f:
-    source = f.read()
-compile(source, p, 'exec')
+with open(p, "rb") as f:
+    compile(f.read(), p, "exec")
 PY
 }
 
@@ -71,73 +67,34 @@ say "Lade Versionsinformationen..."
 fetch "$META_URL" "$TMPDIR/latest.json" || fail "latest.json konnte nicht geladen werden."
 
 VERSION=$(json_value version) || fail "Version konnte nicht gelesen werden."
-MODE=$(json_value mode) || fail "Installationsmodus konnte nicht gelesen werden."
+DOWNLOAD=$(json_value download) || fail "Download-URL konnte nicht gelesen werden."
+EXPECTED=$(json_value sha256) || fail "SHA256 konnte nicht gelesen werden."
 
 say "Version: $VERSION"
+say "Lade Paket..."
+fetch "$DOWNLOAD" "$ZIPFILE" || fail "Paket konnte nicht geladen werden."
 
-if [ "$MODE" = "delta" ]; then
-    BASE_DOWNLOAD=$(json_value base_download) || fail "Basis-Download konnte nicht gelesen werden."
-    BASE_EXPECTED=$(json_value base_sha256) || fail "Basis-SHA256 konnte nicht gelesen werden."
-    PLUGIN_EXPECTED=$(json_value plugin_sha256) || fail "Plugin-SHA256 konnte nicht gelesen werden."
-    OVERLAY_DOWNLOAD=$(json_value overlay_download) || fail "Overlay-Download konnte nicht gelesen werden."
-    OVERLAY_EXPECTED=$(json_value overlay_sha256) || fail "Overlay-SHA256 konnte nicht gelesen werden."
+ACTUAL=$(sha256_file "$ZIPFILE") || fail "SHA256-Pruefung fehlgeschlagen."
+[ "$ACTUAL" = "$EXPECTED" ] || fail "SHA256 stimmt nicht. Installation abgebrochen."
+say "SHA256: OK"
 
-    say "Lade gepruefte Basis..."
-    fetch "$BASE_DOWNLOAD" "$ZIPFILE" || fail "Basis-ZIP konnte nicht geladen werden."
-    BASE_ACTUAL=$(sha256_file "$ZIPFILE") || fail "Basis-SHA256-Pruefung fehlgeschlagen."
-    [ "$BASE_ACTUAL" = "$BASE_EXPECTED" ] || fail "Basis-SHA256 stimmt nicht. Installation abgebrochen."
-    say "Basis-SHA256: OK"
-
-    say "Entpacke Basis..."
-    if command -v unzip >/dev/null 2>&1; then
-        unzip -q -o "$ZIPFILE" -d "$EXTRACT" || fail "Entpacken fehlgeschlagen."
-    else
-        python3 -m zipfile -e "$ZIPFILE" "$EXTRACT" || fail "Entpacken fehlgeschlagen."
-    fi
-
-    [ -f "$EXTRACT/SafeUpdate2026/background.png" ] || fail "background.png fehlt in der Basis."
-    [ -f "$EXTRACT/SafeUpdate2026/__init__.py" ] || fail "__init__.py fehlt in der Basis."
-
-    say "Lade r25 Plugin-Code..."
-    python3 - "$TMPDIR/latest.json" > "$TMPDIR/parts.txt" <<'PY' || fail "Plugin-Teile konnten nicht gelesen werden."
-import json, sys
-with open(sys.argv[1], 'r') as f:
-    data = json.load(f)
-for url in data['plugin_parts']:
-    print(url)
-PY
-
-    : > "$EXTRACT/SafeUpdate2026/plugin.py" || fail "plugin.py konnte nicht vorbereitet werden."
-    PARTNO=0
-    while IFS= read -r URL; do
-        [ -n "$URL" ] || continue
-        PART="$TMPDIR/plugin.part.$PARTNO"
-        fetch "$URL" "$PART" || fail "Plugin-Teil $PARTNO konnte nicht geladen werden."
-        cat "$PART" >> "$EXTRACT/SafeUpdate2026/plugin.py" || fail "Plugin-Teil $PARTNO konnte nicht zusammengesetzt werden."
-        PARTNO=$((PARTNO + 1))
-    done < "$TMPDIR/parts.txt"
-    [ "$PARTNO" -gt 0 ] || fail "Keine Plugin-Teile gefunden."
-
-    PLUGIN_ACTUAL=$(sha256_file "$EXTRACT/SafeUpdate2026/plugin.py") || fail "Plugin-SHA256-Pruefung fehlgeschlagen."
-    [ "$PLUGIN_ACTUAL" = "$PLUGIN_EXPECTED" ] || fail "Plugin-SHA256 stimmt nicht. Installation abgebrochen."
-    say "Plugin-SHA256: OK"
-
-    say "Lade r25 Oberflaechen-Fix..."
-    fetch "$OVERLAY_DOWNLOAD" "$EXTRACT/SafeUpdate2026/r25_overlay.png" || fail "r25 Overlay konnte nicht geladen werden."
-    OVERLAY_ACTUAL=$(sha256_file "$EXTRACT/SafeUpdate2026/r25_overlay.png") || fail "Overlay-SHA256-Pruefung fehlgeschlagen."
-    [ "$OVERLAY_ACTUAL" = "$OVERLAY_EXPECTED" ] || fail "Overlay-SHA256 stimmt nicht. Installation abgebrochen."
-    say "Overlay-SHA256: OK"
+say "Entpacke Paket..."
+if command -v unzip >/dev/null 2>&1; then
+    unzip -q -o "$ZIPFILE" -d "$EXTRACT" || fail "Entpacken fehlgeschlagen."
 else
-    fail "Unbekannter Installationsmodus: $MODE"
+    python3 -m zipfile -e "$ZIPFILE" "$EXTRACT" || fail "Entpacken fehlgeschlagen."
 fi
 
-[ -f "$EXTRACT/SafeUpdate2026/plugin.py" ] || fail "plugin.py fehlt."
-syntax_check "$EXTRACT/SafeUpdate2026/plugin.py" || fail "Python-Syntaxpruefung des Downloads fehlgeschlagen."
+PACKAGE_DIR="$EXTRACT/SafeUpdate2026"
+[ -d "$PACKAGE_DIR" ] || fail "SafeUpdate2026-Verzeichnis fehlt im Paket."
+[ -f "$PACKAGE_DIR/plugin.py" ] || fail "plugin.py fehlt."
+[ -f "$PACKAGE_DIR/__init__.py" ] || fail "__init__.py fehlt."
+
+syntax_check "$PACKAGE_DIR/plugin.py" || fail "Python-Syntaxpruefung fehlgeschlagen."
 say "Python-Syntax: OK"
 
-# Keine Build-/Runtime-Caches aus dem Staging uebernehmen.
-rm -rf "$EXTRACT/SafeUpdate2026/__pycache__"
-find "$EXTRACT/SafeUpdate2026" -name '*.pyc' -delete 2>/dev/null || true
+rm -rf "$PACKAGE_DIR/__pycache__"
+find "$PACKAGE_DIR" -name '*.pyc' -delete 2>/dev/null || true
 
 rm -rf "$BACKUP_DIR"
 if [ -d "$PLUGIN_DIR" ]; then
@@ -147,8 +104,8 @@ fi
 
 say "Installiere SafeUpdate2026..."
 rm -rf "$PLUGIN_DIR"
-if ! cp -a "$EXTRACT/SafeUpdate2026" "$PLUGIN_DIR"; then
-    say "Installation fehlgeschlagen - versuche Rollback..."
+if ! cp -a "$PACKAGE_DIR" "$PLUGIN_DIR"; then
+    say "Installation fehlgeschlagen - Rollback..."
     rm -rf "$PLUGIN_DIR"
     [ -d "$BACKUP_DIR" ] && cp -a "$BACKUP_DIR" "$PLUGIN_DIR"
     fail "Installation fehlgeschlagen."
