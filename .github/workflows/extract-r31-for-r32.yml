@@ -1,0 +1,37 @@
+name: Extract r31 source for r32
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.extract-r31-for-r32-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract exact r31 plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r31extract .r32-src
+          mkdir -p /tmp/r31extract .r32-src
+          unzip -q SafeUpdate2026_2026.1-r31.zip -d /tmp/r31extract
+          cp /tmp/r31extract/SafeUpdate2026/plugin.py .r32-src/plugin_r31.py
+          python3 -m py_compile .r32-src/plugin_r31.py
+      - name: Commit extracted source and remove extractor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .r32-src/plugin_r31.py
+          git rm -f .extract-r31-for-r32-trigger .github/workflows/extract-r31-for-r32.yml
+          git commit -m "Stage exact r31 source for r32"
+          git push origin HEAD:main
