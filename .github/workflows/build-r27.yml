@@ -36,12 +36,14 @@ jobs:
           python3 - <<'PY'
           import base64, os, pathlib, zlib
           workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
-          src = workspace / ".r27-src" / "plugin.zlib.b64"
-          out = pathlib.Path("SafeUpdate2026/plugin.py")
-          out.write_bytes(zlib.decompress(base64.b64decode(src.read_text().strip())))
+          outdir = pathlib.Path("SafeUpdate2026")
+          plugin = workspace / ".r27-src" / "plugin.zlib.b64"
+          readme = workspace / ".r27-src" / "README.b64"
+          init = workspace / ".r27-src" / "init.b64"
+          (outdir / "plugin.py").write_bytes(zlib.decompress(base64.b64decode(plugin.read_text().strip())))
+          (outdir / "README.txt").write_bytes(base64.b64decode(readme.read_text().strip()))
+          (outdir / "__init__.py").write_bytes(base64.b64decode(init.read_text().strip()))
           PY
-          cp "$GITHUB_WORKSPACE/.r27-src/README.txt" SafeUpdate2026/README.txt
-          cp "$GITHUB_WORKSPACE/.r27-src/__init__.py" SafeUpdate2026/__init__.py
 
           test "$(sha256sum SafeUpdate2026/plugin.py | awk '{print $1}')" = "ac3416403e54d4913a5e535303fe3824c7f6b6637798abfe9b29f41df090e7d7"
           test "$(sha256sum SafeUpdate2026/README.txt | awk '{print $1}')" = "66f7873cae67527702dba3125f9cf2243343a9dfc497d549a5803e710327dafb"
