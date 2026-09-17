@@ -1,0 +1,83 @@
+name: Build SafeUpdate2026 r29 ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.r29-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r29:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify r29
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r29build
+          mkdir -p /tmp/r29build
+          cp SafeUpdate2026_2026.1-r28.zip /tmp/r29build/r28.zip
+          cd /tmp/r29build
+          unzip -q r28.zip
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+
+          old_version = 'PLUGIN_VERSION = "2026.1-r28"'
+          if s.count(old_version) != 1:
+              raise SystemExit('unexpected r28 version marker count: %d' % s.count(old_version))
+          s = s.replace(old_version, 'PLUGIN_VERSION = "2026.1-r29"', 1)
+
+          old_pixmap = '''        <ePixmap zPosition="0" position="0,0" size="1920,1080"\n                 pixmap="__BACKGROUND_PATH__"\n                 alphatest="on" />'''
+          new_pixmap = '''        <ePixmap zPosition="0" position="0,0" size="1920,1080"\n                 pixmap="__BACKGROUND_PATH__"\n                 scale="1" alphatest="on" />'''
+          if s.count(old_pixmap) != 1:
+              raise SystemExit('unexpected background ePixmap marker count: %d' % s.count(old_pixmap))
+          s = s.replace(old_pixmap, new_pixmap, 1)
+
+          p.write_text(s, encoding='utf-8')
+          compile(p.read_bytes(), str(p), 'exec')
+          PY
+
+          grep -q 'PLUGIN_VERSION = "2026.1-r29"' SafeUpdate2026/plugin.py
+          grep -q 'scale="1" alphatest="on"' SafeUpdate2026/plugin.py
+          grep -q 'size="1920,1080" resolution="1920,1080"' SafeUpdate2026/plugin.py
+          test -f SafeUpdate2026/background_generic.png
+          test -f SafeUpdate2026/background_vu_duo4kse.png
+          test -f SafeUpdate2026/__init__.py
+
+          rm -f "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r29.zip"
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r29.zip" SafeUpdate2026
+          SHA="$(sha256sum "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r29.zip" | awk '{print $1}')"
+
+          cat > "$GITHUB_WORKSPACE/latest.json" <<EOF
+          {
+            "version": "2026.1-r29",
+            "mode": "full",
+            "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r29.zip",
+            "sha256": "$SHA",
+            "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+          }
+          EOF
+          echo "r29 sha256=$SHA"
+
+      - name: Publish r29 and clean temporary files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r29.zip latest.json
+          git rm -f .r29-trigger
+          git rm -rf .debug-r28 .debug-r28-trigger .github/workflows/extract-r28.yml .github/workflows/build-r29.yml
+          git commit -m "Add SafeUpdate2026 2026.1-r29 background scaling fix"
+          git push origin HEAD:main
