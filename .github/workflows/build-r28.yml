@@ -1,0 +1,71 @@
+name: Build SafeUpdate2026 r28 ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.r28-src/TRIGGER'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r28:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify r28
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r28build
+          mkdir -p /tmp/r28build
+          cp SafeUpdate2026_2026.1-r27.zip /tmp/r28build/r27.zip
+          cd /tmp/r28build
+          unzip -q r27.zip
+
+          python3 - <<'PY'
+          import base64, os, pathlib, zlib
+          ws = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          pkg = pathlib.Path('SafeUpdate2026')
+          (pkg / 'plugin.py').write_bytes(zlib.decompress(base64.b64decode((ws / '.r28-src' / 'plugin.zlib.b64').read_text().strip())))
+          (pkg / 'README.txt').write_bytes(base64.b64decode((ws / '.r28-src' / 'README.b64').read_text().strip()))
+          compile((pkg / 'plugin.py').read_bytes(), str(pkg / 'plugin.py'), 'exec')
+          PY
+
+          test "$(sha256sum SafeUpdate2026/plugin.py | awk '{print $1}')" = "4f602245c7e9c35e1a34749da43c1706de3e785ff4bb71eb10db22338054e4c8"
+          test "$(sha256sum SafeUpdate2026/README.txt | awk '{print $1}')" = "c9cf035e9952a62efdc63e323bfd0e8b5c5df342f6df03b584c1975ba33b30b3"
+          grep -q 'PLUGIN_VERSION = "2026.1-r28"' SafeUpdate2026/plugin.py
+          grep -q 'resolution="1920,1080"' SafeUpdate2026/plugin.py
+          test -f SafeUpdate2026/background_generic.png
+          test -f SafeUpdate2026/background_vu_duo4kse.png
+          test -f SafeUpdate2026/__init__.py
+
+          rm -f "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip"
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip" SafeUpdate2026
+          SHA="$(sha256sum "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r28.zip" | awk '{print $1}')"
+          cat > "$GITHUB_WORKSPACE/latest.json" <<EOF
+          {
+            "version": "2026.1-r28",
+            "mode": "full",
+            "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r28.zip",
+            "sha256": "$SHA",
+            "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+          }
+          EOF
+          echo "r28 sha256=$SHA"
+
+      - name: Publish r28 and clean staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r28.zip latest.json
+          git rm -r .r28-src .github/workflows/build-r28.yml
+          git commit -m "Add SafeUpdate2026 2026.1-r28 scaling fix"
+          git push origin HEAD:main
