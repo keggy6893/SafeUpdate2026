@@ -29,6 +29,8 @@ jobs:
           cd /tmp/r27build
           unzip -q r26.zip
 
+          echo "r26 source background hashes:"
+          sha256sum SafeUpdate2026/background.png SafeUpdate2026/background_generic.png SafeUpdate2026/background_vu_duo4kse.png
           test "$(sha256sum SafeUpdate2026/background.png | awk '{print $1}')" = "8e950f61654321cc2ed1b366a36aa4b0cafe3a6f47731cb650735e693438749a"
           test "$(sha256sum SafeUpdate2026/background_generic.png | awk '{print $1}')" = "8e950f61654321cc2ed1b366a36aa4b0cafe3a6f47731cb650735e693438749a"
           test "$(sha256sum SafeUpdate2026/background_vu_duo4kse.png | awk '{print $1}')" = "bbc86893002abf155840577d8b02ce907e408436dd6882b43b6c9d6d7c417739"
@@ -45,6 +47,8 @@ jobs:
           (outdir / "__init__.py").write_bytes(base64.b64decode(init.read_text().strip()))
           PY
 
+          echo "r27 staged text hashes:"
+          sha256sum SafeUpdate2026/plugin.py SafeUpdate2026/README.txt SafeUpdate2026/__init__.py
           test "$(sha256sum SafeUpdate2026/plugin.py | awk '{print $1}')" = "ac3416403e54d4913a5e535303fe3824c7f6b6637798abfe9b29f41df090e7d7"
           test "$(sha256sum SafeUpdate2026/README.txt | awk '{print $1}')" = "66f7873cae67527702dba3125f9cf2243343a9dfc497d549a5803e710327dafb"
           test "$(sha256sum SafeUpdate2026/__init__.py | awk '{print $1}')" = "8b084a9f378124b2b1a51563bf3c22444eb7ff33692017da28b2136ae56987ed"
