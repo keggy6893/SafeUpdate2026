@@ -1,7 +1,7 @@
 {
-  "version": "2026.1-r30",
+  "version": "2026.1-r31",
   "mode": "full",
-  "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r30.zip",
-  "sha256": "f4d57b797e772af2aa8891901c566c01033362e2fb667393cd29ff72de03ebc2",
+  "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r31.zip",
+  "sha256": "f2430e49c8886000e4ca34fd0818cbc9b39315b4e41142494e3008929bca93c4",
   "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
 }
