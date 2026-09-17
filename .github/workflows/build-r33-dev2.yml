@@ -1,0 +1,143 @@
+name: Build SafeUpdate2026 r33 dev2
+
+on:
+  push:
+    branches: [r33-dev]
+    paths:
+      - '.r33-dev2/build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r33-dev2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify r33 dev2
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r33dev2
+          mkdir -p /tmp/r33dev2
+          unzip -q SafeUpdate2026_2026.1-r33-dev1.zip -d /tmp/r33dev2
+          python3 .r33-dev2/patch_dev2.py /tmp/r33dev2/SafeUpdate2026/plugin.py
+          python3 -m py_compile /tmp/r33dev2/SafeUpdate2026/plugin.py
+          rm -rf /tmp/r33dev2/SafeUpdate2026/__pycache__
+          find /tmp/r33dev2/SafeUpdate2026 -name '*.pyc' -delete 2>/dev/null || true
+
+          python3 - <<'PY'
+          import ast, pathlib
+          p = pathlib.Path('/tmp/r33dev2/SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+          tree = ast.parse(s)
+          funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+          classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+
+          required_funcs = {
+              'validate_internal_backup_state', 'discover_internal_backups',
+              'start_internal_backup', 'do_internal_backup', 'internal_backup_closed',
+              'request_delete_internal_backup', 'do_delete_internal_backup', 'internal_delete_closed',
+              'restore_internal_backup', 'do_restore_internal_backup', 'restore_closed',
+              'gigablue_kernel_layout_ok', 'expected_kernel_device',
+              'current_system_fingerprint', 'physically_verified_rotation_state',
+              'ensure_rotation_state', 'persist_rotation_state', 'post_update_rotation_delay',
+              'get_rotation_service', 'rotation_sessionstart',
+              'paint_update_state', 'start_update'
+          }
+          missing = sorted(required_funcs - funcs)
+          if missing:
+              raise SystemExit('missing functions: %s' % ', '.join(missing))
+          if 'SafeUpdateRotationService' not in classes:
+              raise SystemExit('SafeUpdateRotationService missing')
+
+          checks = [
+              'PLUGIN_VERSION = "2026.1-r33-dev2"',
+              'INTERNAL_BACKUP_DIRNAME = "safeupdate2026"',
+              'ROTATION_INTERVAL = 24 * 60 * 60',
+              'ROTATION_TICK_MS = 30 * 60 * 1000',
+              'GBTRIO4K_KERNEL_DEVICES',
+              'gigablue_kernel_layout_ok',
+              'KILLSWITCH blockiert',
+              'STARTUP_%d bleibt erhalten',
+              'Kein vorhandener Multiboot-Slot wird verändert.',
+              'Kein linuxrootfs-Slot, keine Kernelpartition und Recovery werden verändert.',
+              '9 = WIEDERHERSTELLEN',
+              '"7": self.force_rotation_now',
+              '"8": self.toggle_rotation',
+              'WHERE_SESSIONSTART',
+              'ROTATION_VERIFIED',
+              'UPDATE GESPERRT – BACKUP LÄUFT',
+              'Sicherheitsbackup wird erstellt und verifiziert.',
+              '#9b111e',
+              '#ff5a5f',
+              'Update ist gesperrt, solange ein Sicherheitsvorgang läuft.',
+              'ui.paint_update_state()',
+          ]
+          for item in checks:
+              if item not in s:
+                  raise SystemExit('missing safety/dev2 marker: %r' % item)
+
+          # Guard must occur before backup_verified check in start_update.
+          start = s.index('    def start_update(self):')
+          end = s.find('\n    def ', start + 5)
+          block = s[start:end if end > 0 else len(s)]
+          if block.index('if self.busy:') > block.index('if not self.backup_verified:'):
+              raise SystemExit('busy guard is not first in start_update')
+
+          # Busy red-lock branch must precede the verified/blue state.
+          paint = s.index('    def paint_update_state(self):')
+          pend = s.index('    def connect_container(', paint)
+          pblock = s[paint:pend]
+          if pblock.index('if self.busy:') > pblock.index('elif self.backup_verified:'):
+              raise SystemExit('red busy lock does not take precedence')
+
+          if 're.match(r"^STARTUP_(\\d+)$", base)' not in s:
+              raise SystemExit('numeric STARTUP filter missing')
+          print('r33-dev2 static safety checks: OK')
+          PY
+
+          cat > /tmp/r33dev2/SafeUpdate2026/README.txt <<'EOF'
+          SafeUpdate2026 2026.1-r33-dev2
+          ==============================
+
+          Hardware-Teststand auf Basis des auf VU+ Duo 4K SE bestaetigten r33-dev1.
+
+          Neu in dev2:
+          - Update-Bereich wird waehrend Backup oder Auto-Rotation sichtbar ROT gesperrt.
+          - Text: UPDATE GESPERRT – BACKUP LAEUFT.
+          - Hinweis: Sicherheitsbackup wird erstellt und verifiziert.
+          - Gruen/OK kann waehrend eines laufenden Sicherheitsvorgangs kein Update starten.
+          - Auch Loeschen und Wiederherstellung zeigen einen roten Sicherheits-Lock.
+          - Nach Ende des Vorgangs kehrt die Anzeige automatisch in den normalen Zustand zurueck.
+
+          r33-dev1 Funktionen bleiben erhalten:
+          - r32 Unterbau inklusive internem eMMC-Fallback und GigaBlue-Schutz
+          - Killswitch 0 und Notfall-Restore 9
+          - 24h Auto-Rotation
+          - Taste 7 manueller Rotationstest, Taste 8 Auto EIN/AUS
+          - altes verifiziertes Backup bleibt bis zur Verifikation der neuen Kopie bestehen
+          - Hintergrunddienst funktioniert bei geschlossenem Plugin und normalem Standby
+          EOF
+          sed -i 's/^          //' /tmp/r33dev2/SafeUpdate2026/README.txt
+
+          rm -f SafeUpdate2026_2026.1-r33-dev2.zip
+          cd /tmp/r33dev2
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r33-dev2.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r33-dev2.zip | awk '{print $1}')"
+          echo "$SHA  SafeUpdate2026_2026.1-r33-dev2.zip" > r33-dev-sha256.txt
+          python3 -c 'import json,sys; data={"version":"2026.1-r33-dev2","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/r33-dev/SafeUpdate2026_2026.1-r33-dev2.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("latest-r33-test.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$SHA"
+
+      - name: Publish r33 dev2 on test branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add SafeUpdate2026_2026.1-r33-dev2.zip latest-r33-test.json r33-dev-sha256.txt
+          git commit -m 'Publish r33 dev2 red update lock'
+          git push origin HEAD:r33-dev
