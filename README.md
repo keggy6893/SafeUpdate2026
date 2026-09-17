@@ -4,12 +4,12 @@ SafeUpdate2026 ist ein Enigma2-Plugin fuer einen abgesicherten OpenATV-Update-Ab
 
 ## Aktueller Teststand
 
-- Version: `2026.1-r24`
+- Version: `2026.1-r25`
 - Ziel: Enigma2 / OpenATV mit KEXEC-Multiboot
-- Hardware-Anzeige: dynamisch, nicht auf VU+ fest verdrahtet
+- r25: dynamische Receiver-Erkennung und herstellerneutrale Kopf-/Hero-Anzeige fuer VU+, GigaBlue, Octagon und weitere Boxen
 - Sicherheitsprinzip: erst pruefen, Backup erstellen und verifizieren, danach Update freigeben
 
-> **Testversion:** Vor einer breiten Veroeffentlichung wird die Erkennung auf weiteren Receivern wie Octagon und GigaBlue getestet. Auf fremder Hardware bitte zunaechst nur Erkennung/Slot-Status pruefen und keinen Update-Lauf erzwingen.
+> **Testversion fuer weitere Receiver:** Auf GigaBlue/Octagon bitte zunaechst nur Plugin oeffnen und Erkennung/Slot-Status pruefen. Solange KEXEC, HOLDs oder Datentraeger nicht eindeutig als OK erkannt werden, kein Backup und kein OpenATV-Update starten.
 
 ## Installation per Telnet
 
@@ -17,18 +17,20 @@ SafeUpdate2026 ist ein Enigma2-Plugin fuer einen abgesicherten OpenATV-Update-Ab
 wget -qO- https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/install.sh | sh
 ```
 
-Der Installer laedt die in `latest.json` angegebene Version, prueft SHA256 und Python-Syntax, sichert eine vorhandene Installation und fuehrt bei einem Installationsfehler ein Rollback durch.
+Falls `wget` fehlt und `curl` vorhanden ist:
 
-## Dateien
-
-- `install.sh` – Telnet-Installer
-- `latest.json` – aktuelle Version, Download und SHA256
-- `SafeUpdate2026_2026.1-r24.zip` – aktuelle Plugin-Datei
-
-## Aktuelle SHA256
-
-`SafeUpdate2026_2026.1-r24.zip`
-
-```text
-0fe477c4e6aa3a351219a57d68a091587f13f62cc2bd63f208c8e581407a035d
+```sh
+curl -fsSL https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/install.sh | sh
 ```
+
+Der Installer laedt die in `latest.json` festgelegte Version, prueft alle Nutzdaten per SHA256, prueft die Python-Syntax, sichert eine vorhandene Installation und fuehrt bei einem Installationsfehler ein Rollback durch.
+
+## r25
+
+- feste/doppelte Herstelleranzeige entfernt
+- Receivername in der Kopfzeile dynamisch
+- Modell-Erkennung fuer gaengige GigaBlue-/Octagon-Modelle erweitert
+- rechter Hero-Bereich herstellerneutral
+- Backup-/KEXEC-/Slot-/Update-Logik gegenueber r24 nicht geaendert
+
+Die r25-Verteilung verwendet die gepruefte r24-Basis plus SHA256-gepruefte r25-Code-/UI-Deltas. Dadurch bleibt der Telnet-Installer eine einzelne, dauerhaft gleiche Befehlszeile.
