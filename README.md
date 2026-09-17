@@ -4,12 +4,15 @@ SafeUpdate2026 ist ein Enigma2-Plugin fuer einen abgesicherten OpenATV-Update-Ab
 
 ## Aktueller Teststand
 
-- Version: `2026.1-r25`
+- Version: `2026.1-r26`
 - Ziel: Enigma2 / OpenATV mit KEXEC-Multiboot
-- r25: dynamische Receiver-Erkennung und herstellerneutrale Kopf-/Hero-Anzeige fuer VU+, GigaBlue, Octagon und weitere Boxen
+- Receiver-Erkennung dynamisch fuer VU+, Octagon, GigaBlue und weitere Boxen
+- VU+ Duo 4K SE: klassische Receiver-Grafik
+- andere Receiver: herstellerneutrale r26-Grafik
 - Sicherheitsprinzip: erst pruefen, Backup erstellen und verifizieren, danach Update freigeben
+- Backup-/KEXEC-/Slot-/Update-Logik gegenueber dem bewaehrten Stand nicht erweitert oder entschaerft
 
-> **Testversion fuer weitere Receiver:** Auf GigaBlue/Octagon bitte zunaechst nur Plugin oeffnen und Erkennung/Slot-Status pruefen. Solange KEXEC, HOLDs oder Datentraeger nicht eindeutig als OK erkannt werden, kein Backup und kein OpenATV-Update starten.
+> **Tester-Hinweis:** Auf weiteren Receivern bitte zuerst nur Plugin oeffnen und Receiver-Erkennung, KEXEC/HOLD-Status und Slot-Erkennung pruefen. Solange ein Sicherheitsstatus nicht eindeutig OK ist, kein Backup und kein OpenATV-Update starten.
 
 ## Installation per Telnet
 
@@ -23,14 +26,14 @@ Falls `wget` fehlt und `curl` vorhanden ist:
 curl -fsSL https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/install.sh | sh
 ```
 
-Der Installer laedt die in `latest.json` festgelegte Version, prueft alle Nutzdaten per SHA256, prueft die Python-Syntax, sichert eine vorhandene Installation und fuehrt bei einem Installationsfehler ein Rollback durch.
+Der Installer laedt den in `latest.json` festgelegten r26-Teststand. Die r24-Basis wird per SHA256 geprueft; die r26-Code- und Grafik-Payloads werden gegen ihre Git-Blob-SHAs verifiziert. Danach wird der Python-Code entpackt und syntaktisch geprueft. Eine vorhandene Installation wird vor dem Austausch gesichert; bei Installations- oder Syntaxfehlern erfolgt ein Rollback. Build-/Runtime-Caches (`__pycache__`, `*.pyc`) werden nicht uebernommen.
 
-## r25
+## 2026.1-r26
 
-- feste/doppelte Herstelleranzeige entfernt
-- Receivername in der Kopfzeile dynamisch
-- Modell-Erkennung fuer gaengige GigaBlue-/Octagon-Modelle erweitert
-- rechter Hero-Bereich herstellerneutral
-- Backup-/KEXEC-/Slot-/Update-Logik gegenueber r24 nicht geaendert
-
-Die r25-Verteilung verwendet die gepruefte r24-Basis plus SHA256-gepruefte r25-Code-/UI-Deltas. Dadurch bleibt der Telnet-Installer eine einzelne, dauerhaft gleiche Befehlszeile.
+- Receiver-Hersteller und Modell dynamisch erkannt
+- VU+ Duo 4K SE behaelt die klassische Hero-Grafik
+- andere Receiver verwenden die neutrale Receiver-/Schutzgrafik
+- r26-Code liegt platzsparend als `r26/plugin.zlib.b64` vor
+- neutrale Grafik liegt als `r26/generic.jpg.b64` vor
+- Tester-Installer verwendet die gepruefte r24-Basis und setzt darauf die verifizierten r26-Payloads
+- ein einzelner, dauerhaft gleicher Telnet-Befehl bleibt erhalten
