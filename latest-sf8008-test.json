@@ -1,0 +1,7 @@
+{
+  "version": "2026.1-r32-local-sf8008-1",
+  "mode": "full",
+  "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/local-sf8008-test/SafeUpdate2026_2026.1-r32-local-sf8008-1.zip",
+  "sha256": "f4e8c3a235474fa14bda0fdb27bf98ac311263d91c2b5a412c51e7888b0a7762",
+  "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+}
