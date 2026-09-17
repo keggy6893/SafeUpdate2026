@@ -24,6 +24,7 @@ jobs:
           rm -rf /tmp/r30build
           mkdir -p /tmp/r30build
           unzip -q SafeUpdate2026_2026.1-r29.zip -d /tmp/r30build
+          python3 -c 'from pathlib import Path; p=Path(".r30-src/patch_r30.py"); s=p.read_text(); s=s.replace("pat.subn(repl, s, count=1)", "pat.subn(lambda m: repl, s, count=1)"); s=s.replace("script_pat.subn(script_repl, s, count=1)", "script_pat.subn(lambda m: script_repl, s, count=1)"); s=s.replace("rollback_pat.subn(rollback_repl, s, count=1)", "rollback_pat.subn(lambda m: rollback_repl, s, count=1)"); s=s.replace("delete_pat.subn(delete_repl, s, count=1)", "delete_pat.subn(lambda m: delete_repl, s, count=1)"); p.write_text(s)'
           python3 .r30-src/patch_r30.py /tmp/r30build/SafeUpdate2026/plugin.py
           python3 -m py_compile /tmp/r30build/SafeUpdate2026/plugin.py
           printf '%s\n' \
@@ -43,17 +44,7 @@ jobs:
           zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r30.zip" SafeUpdate2026
           cd "$GITHUB_WORKSPACE"
           SHA="$(sha256sum SafeUpdate2026_2026.1-r30.zip | awk '{print $1}')"
-          python3 - "$SHA" <<'PY'
-          import json, sys
-          data = {
-              "version": "2026.1-r30",
-              "mode": "full",
-              "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r30.zip",
-              "sha256": sys.argv[1],
-              "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026",
-          }
-          open("latest.json", "w", encoding="utf-8").write(json.dumps(data, indent=2) + "\n")
-          PY
+          python3 -c 'import json,sys; data={"version":"2026.1-r30","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r30.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("latest.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$SHA"
 
       - name: Publish r30 and clean temporary files
         shell: bash
