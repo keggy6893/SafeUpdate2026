@@ -1,0 +1,100 @@
+name: Build SafeUpdate2026 r32 ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.r32-build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build-r32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify r32
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r32build
+          mkdir -p /tmp/r32build
+          unzip -q SafeUpdate2026_2026.1-r31.zip -d /tmp/r32build
+          python3 .r32-src/patch_r32.py /tmp/r32build/SafeUpdate2026/plugin.py
+          python3 -m py_compile /tmp/r32build/SafeUpdate2026/plugin.py
+
+          python3 - <<'PY'
+          import ast, pathlib
+          p = pathlib.Path('/tmp/r32build/SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+          tree = ast.parse(s)
+          funcs = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          required = {
+              'validate_internal_backup_state', 'discover_internal_backups',
+              'start_internal_backup', 'do_internal_backup', 'internal_backup_closed',
+              'request_delete_internal_backup', 'do_delete_internal_backup', 'internal_delete_closed',
+              'restore_internal_backup', 'do_restore_internal_backup', 'restore_closed'
+          }
+          missing = sorted(required - funcs)
+          if missing:
+              raise SystemExit('missing r32 functions: %s' % ', '.join(missing))
+          checks = [
+              'PLUGIN_VERSION = "2026.1-r32"',
+              'INTERNAL_BACKUP_DIRNAME = "safeupdate2026"',
+              'Kein freier Multiboot-Slot – verwende internes eMMC-Sicherheitsbackup.',
+              'Kein vorhandener Multiboot-Slot wird verändert.',
+              '9 = WIEDERHERSTELLEN',
+              'Kein linuxrootfs-Slot, keine Kernelpartition und Recovery werden verändert.'
+          ]
+          for item in checks:
+              if item not in s:
+                  raise SystemExit('missing safety marker: %r' % item)
+          # Existing GigaBlue and Killswitch protections must survive the patch.
+          for item in ('GBTRIO4K_KERNEL_DEVICES', 'gigablue_kernel_layout_ok', 'expected_kernel_device',
+                       'KILLSWITCH blockiert', 'STARTUP_%d bleibt erhalten'):
+              if item not in s:
+                  raise SystemExit('lost existing protection: %r' % item)
+          print('r32 static safety checks: OK')
+          PY
+
+          cat > /tmp/r32build/SafeUpdate2026/README.txt <<'EOF'
+          SafeUpdate2026 2026.1-r32
+          =========================
+
+          Neu: internes eMMC-Sicherheitsbackup als automatischer Fallback, wenn kein freier Multiboot-Slot vorhanden ist.
+
+          - Kein USB-Datentraeger erforderlich.
+          - Vorhandene linuxrootfs-Slots werden nicht ueberschrieben.
+          - Recovery/Root-Image wird nie als Backup-Ziel benutzt.
+          - Backup liegt separat im gemeinsamen Multiboot-Dateisystem unter /safeupdate2026/slotN.
+          - GigaBlue: RootFS plus separate Kernelpartition werden in RootFS + kernel.img gesichert und per SHA256 verifiziert.
+          - Erst nach erfolgreicher Verifikation wird das OpenATV-Update freigegeben.
+          - Killswitch Taste 0 loescht im internen Modus ausschliesslich /safeupdate2026/slotN.
+          - Notfall-Rueckkehr: von einem anderen Slot booten; Taste 9 stellt den gesicherten Quellslot wieder her.
+          - Der laufende Slot kann niemals ueber sich selbst wiederhergestellt werden.
+          - Bestehender bootfaehiger Slot-Backup-Modus bleibt erhalten, wenn ein freier Slot vorhanden ist.
+          - GigaBlue r30/r31 Kernel-/STARTUP-Schutz bleibt erhalten.
+          EOF
+          sed -i 's/^          //' /tmp/r32build/SafeUpdate2026/README.txt
+
+          rm -f SafeUpdate2026_2026.1-r32.zip
+          cd /tmp/r32build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r32.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r32.zip | awk '{print $1}')"
+          python3 -c 'import json,sys; data={"version":"2026.1-r32","mode":"full","download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/main/SafeUpdate2026_2026.1-r32.zip","sha256":sys.argv[1],"plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"}; open("latest.json","w",encoding="utf-8").write(json.dumps(data,indent=2)+"\n")' "$SHA"
+
+      - name: Publish r32 and clean temporary files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r32.zip latest.json
+          git rm -r -f .r32-src .r32-build-trigger .github/workflows/build-r32.yml
+          git commit -m "Add SafeUpdate2026 2026.1-r32 internal eMMC backup mode"
+          git push origin HEAD:main
