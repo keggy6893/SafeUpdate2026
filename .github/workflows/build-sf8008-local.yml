@@ -1,0 +1,132 @@
+name: Build SafeUpdate2026 SF8008 local test
+
+on:
+  push:
+    branches: [local-sf8008-test]
+    paths:
+      - '.local-sf8008/build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build local SF8008 ZIP from r32
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/sf8008build
+          mkdir -p /tmp/sf8008build
+          unzip -q SafeUpdate2026_2026.1-r32.zip -d /tmp/sf8008build
+          python3 .local-sf8008/patch_sf8008.py /tmp/sf8008build/SafeUpdate2026/plugin.py
+          python3 -m py_compile /tmp/sf8008build/SafeUpdate2026/plugin.py
+
+          python3 - <<'PY'
+          import ast, pathlib, re
+          p = pathlib.Path('/tmp/sf8008build/SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+          tree = ast.parse(s)
+          funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+          required_funcs = {
+              'is_sf8008', 'is_hisi4slot_emmc', 'gigablue_kernel_layout_ok',
+              'validate_internal_backup_state', 'discover_internal_backups',
+              'start_internal_backup', 'do_internal_backup', 'internal_backup_closed',
+              'request_delete_internal_backup', 'do_delete_internal_backup', 'internal_delete_closed',
+              'restore_internal_backup', 'do_restore_internal_backup', 'restore_closed'
+          }
+          missing = sorted(required_funcs - funcs)
+          if missing:
+              raise SystemExit('missing functions: %s' % ', '.join(missing))
+
+          checks = [
+              'PLUGIN_VERSION = "2026.1-r32-local-sf8008-1"',
+              'machinebuild() == "sf8008"', 'oem_name() == "octagon"',
+              'GBTRIO4K_ROOT_DEVICE = "/dev/mmcblk0p16"',
+              '1: "/dev/mmcblk0p12"', '2: "/dev/mmcblk0p13"',
+              '3: "/dev/mmcblk0p14"', '4: "/dev/mmcblk0p15"',
+              'kernel-4.4.35', 'kernel-image-4.4.35', 'kernel-image-uimage-4.4.35',
+              'INTERNAL_BACKUP_DIRNAME = "safeupdate2026"',
+              'Kein vorhandener Multiboot-Slot wird verändert.',
+              'Kein linuxrootfs-Slot, keine Kernelpartition und Recovery werden verändert.',
+              '9 = WIEDERHERSTELLEN',
+              'parts[1] in ("/media/usb", "/media/hdd")'
+          ]
+          for item in checks:
+              if item not in s:
+                  raise SystemExit('missing safety marker: %r' % item)
+
+          if 're.match(r"^STARTUP_(\\d+)$", base)' not in s:
+              raise SystemExit('numeric-only STARTUP filter missing')
+
+          calls = len(re.findall(r'is_gbtrio4k\(\)', s))
+          if calls != 2:
+              raise SystemExit('unexpected direct is_gbtrio4k call count: %d' % calls)
+          print('SF8008 static safety checks: OK')
+          PY
+
+          cat > /tmp/sf8008build/SafeUpdate2026/README.txt <<'EOF'
+          SafeUpdate2026 2026.1-r32-local-sf8008-1
+          =========================================
+
+          Hardware-Teststand fuer Octagon SF8008. Kein allgemeines Release.
+
+          Verifiziertes SF8008 Layout:
+          - RootFS: /dev/mmcblk0p16
+          - Slot 1 Kernel: /dev/mmcblk0p12
+          - Slot 2 Kernel: /dev/mmcblk0p13
+          - Slot 3 Kernel: /dev/mmcblk0p14
+          - Slot 4 Kernel: /dev/mmcblk0p15
+          - STARTUP_5/6 sind USB und werden nicht als interne eMMC-Ziele verwendet.
+          - STARTUP_RECOVERY bleibt unangetastet.
+          EOF
+          sed -i 's/^          //' /tmp/sf8008build/SafeUpdate2026/README.txt
+
+          rm -f SafeUpdate2026_2026.1-r32-local-sf8008-1.zip
+          cd /tmp/sf8008build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r32-local-sf8008-1.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r32-local-sf8008-1.zip | awk '{print $1}')"
+          printf '%s  %s\n' "$SHA" 'SafeUpdate2026_2026.1-r32-local-sf8008-1.zip' > sf8008-sha256.txt
+          python3 - "$SHA" <<'PY'
+          import json, sys
+          sha = sys.argv[1]
+          data = {
+              'version': '2026.1-r32-local-sf8008-1',
+              'mode': 'full',
+              'download': 'https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/local-sf8008-test/SafeUpdate2026_2026.1-r32-local-sf8008-1.zip',
+              'sha256': sha,
+              'plugin_dir': '/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026'
+          }
+          with open('latest-sf8008-test.json', 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          PY
+
+      - name: Publish SF8008 test ZIP on test branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r32-local-sf8008-1.zip sf8008-sha256.txt latest-sf8008-test.json
+          if git diff --cached --quiet; then
+            echo 'No publish changes.'
+          else
+            git commit -m 'Publish SF8008 hardware test build'
+            git push origin HEAD:local-sf8008-test
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeUpdate2026_2026.1-r32-local-sf8008-1
+          path: |
+            SafeUpdate2026_2026.1-r32-local-sf8008-1.zip
+            sf8008-sha256.txt
+          if-no-files-found: error
