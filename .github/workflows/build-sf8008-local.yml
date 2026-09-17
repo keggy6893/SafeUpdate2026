@@ -64,8 +64,9 @@ jobs:
           if 're.match(r"^STARTUP_(\\d+)$", base)' not in s:
               raise SystemExit('numeric-only STARTUP filter missing')
 
+          # Only the helper definition itself may retain the old function name.
           calls = len(re.findall(r'is_gbtrio4k\(\)', s))
-          if calls != 2:
+          if calls != 1:
               raise SystemExit('unexpected direct is_gbtrio4k call count: %d' % calls)
           print('SF8008 static safety checks: OK')
           PY
