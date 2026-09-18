@@ -1,0 +1,142 @@
+name: Build SafeUpdate2026 r34 dev1
+
+on:
+  push:
+    branches: [r34-dev]
+    paths:
+      - '.r34-dev/build-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build r34 dev1 from r33
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r34build
+          mkdir -p /tmp/r34build
+          unzip -q SafeUpdate2026_2026.1-r33.zip -d /tmp/r34build
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/r34build/SafeUpdate2026/plugin.py')
+          s=p.read_text(encoding='utf-8')
+          old='PLUGIN_VERSION = "2026.1-r33"'
+          new='PLUGIN_VERSION = "2026.1-r34-dev1"'
+          if s.count(old) != 1:
+              raise SystemExit('unexpected r33 version marker count: %d' % s.count(old))
+          p.write_text(s.replace(old,new,1), encoding='utf-8')
+          PY
+
+          cp .r34-dev/safeupdate-recover /tmp/r34build/SafeUpdate2026/safeupdate-recover
+          chmod 0755 /tmp/r34build/SafeUpdate2026/safeupdate-recover
+
+          cat > /tmp/r34build/SafeUpdate2026/README-r34-dev1.txt <<'EOF'
+          SafeUpdate2026 2026.1-r34-dev1
+          ===============================
+
+          Entwicklungsstand: Crash-Recovery per Telnet/SSH.
+
+          Ablauf bei Enigma2-Dauerloop:
+          1. init 4
+          2. safeupdate-recover
+          3. Sicherheits-Slot im Multiboot-Menü booten
+          4. dort erneut: init 4
+          5. safeupdate-recover
+          6. Wiederherstellung mit JA bestätigen
+
+          Sicherheitsregeln:
+          - laufender Slot wird niemals überschrieben
+          - nur verified=true / backup_mode=slot
+          - Quelle/Ziel müssen aus numerischem STARTUP_N eindeutig sein
+          - Kernel muss in linuxrootfsN/zImage liegen
+          - separate Kernelpartitionen werden in dev1 blockiert
+          - neue Kopie wird vollständig verifiziert, bevor der defekte Zielbaum ersetzt wird
+          - Sicherheits-Slot bleibt unverändert
+          EOF
+          sed -i 's/^          //' /tmp/r34build/SafeUpdate2026/README-r34-dev1.txt
+
+          python3 -m py_compile /tmp/r34build/SafeUpdate2026/plugin.py /tmp/r34build/SafeUpdate2026/safeupdate-recover
+
+          python3 - <<'PY'
+          import ast, pathlib
+          p=pathlib.Path('/tmp/r34build/SafeUpdate2026/safeupdate-recover')
+          s=p.read_text(encoding='utf-8')
+          tree=ast.parse(s)
+          markers=[
+              'STATE_FILE = "/etc/enigma2/safeupdate2026.json"',
+              'if not st.get("verified")',
+              'if cur != backup:',
+              'if cur == source:',
+              'Separate Kernelpartition erkannt',
+              'NEW_SUFFIX = ".safeupdate-restore-new"',
+              'OLD_SUFFIX = ".safeupdate-broken-old"',
+              'if not valid_tree(backup_dir, expected_hash):',
+              'if not valid_tree(new_dir, expected_hash):',
+              'os.rename(target_dir, old_dir)',
+              'os.rename(new_dir, target_dir)',
+              'Sicherheits-Slot %d wurde NICHT verändert.'
+          ]
+          for m in markers:
+              if m not in s:
+                  raise SystemExit('missing recovery safety marker: %r' % m)
+          funcs={n.name for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
+          for name in ('current_slot','parse_startup','valid_tree','restore','state_or_die'):
+              if name not in funcs:
+                  raise SystemExit('missing helper function: '+name)
+          print('r34 dev1 recovery static safety checks: OK')
+          PY
+
+          rm -rf /tmp/r34build/SafeUpdate2026/__pycache__
+          find /tmp/r34build/SafeUpdate2026 -name '*.pyc' -delete 2>/dev/null || true
+          rm -f SafeUpdate2026_2026.1-r34-dev1.zip
+          cd /tmp/r34build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r34-dev1.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r34-dev1.zip | awk '{print $1}')"
+          python3 - "$SHA" <<'PY'
+          import json,sys
+          sha=sys.argv[1]
+          data={
+            "version":"2026.1-r34-dev1",
+            "mode":"full",
+            "download":"https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/r34-dev/SafeUpdate2026_2026.1-r34-dev1.zip",
+            "sha256":sha,
+            "plugin_dir":"/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+          }
+          with open('latest-r34-test.json','w',encoding='utf-8') as f:
+              json.dump(data,f,indent=2); f.write('\n')
+          PY
+          printf '%s  %s\n' "$SHA" 'SafeUpdate2026_2026.1-r34-dev1.zip' > r34-dev-sha256.txt
+
+      - name: Publish r34 dev1
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r34-dev1.zip latest-r34-test.json r34-dev-sha256.txt
+          if git diff --cached --quiet; then
+            echo 'No publish changes.'
+          else
+            git commit -m 'Publish r34 dev1 crash recovery test build'
+            git push origin HEAD:r34-dev
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeUpdate2026_2026.1-r34-dev1
+          path: |
+            SafeUpdate2026_2026.1-r34-dev1.zip
+            r34-dev-sha256.txt
+          if-no-files-found: error
