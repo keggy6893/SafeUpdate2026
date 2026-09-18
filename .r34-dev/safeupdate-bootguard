@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# SafeUpdate2026 r34-dev2 boot guard
+# Watches the first boot after a SafeUpdate upgrade on the validated VU+ Duo 4K SE layout.
+
+import json
+import os
+import re
+import subprocess
+import time
+
+PLAN_FILE = "/boot/.safeupdate2026-recovery.json"
+PID_FILE = "/var/run/safeupdate-bootguard.pid"
+LOG_FILE = "/tmp/safeupdate-bootguard.log"
+STABLE_SECONDS = 120
+MAX_WAIT_SECONDS = 240
+MAX_PID_CHANGES = 3
+
+def log(msg):
+    line = "[SafeUpdateBootGuard] %s" % msg
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        subprocess.call(["logger", "-t", "SafeUpdate2026", msg])
+    except Exception:
+        pass
+
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def load_plan():
+    try:
+        with open(PLAN_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_plan(plan):
+    tmp = PLAN_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(plan, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PLAN_FILE)
+    subprocess.call(["sync"])
+
+def board():
+    return read_text("/proc/device-tree/bolt/board").replace("\x00", "").strip().lower()
+
+def current_slot():
+    cmd = read_text("/proc/cmdline")
+    for key in ("rootsubdir", "kernel"):
+        m = re.search(r"(?:^|\s)%s=([^\s]+)" % key, cmd)
+        if not m:
+            continue
+        val = m.group(1).strip("'\"")
+        m2 = re.search(r"(?:^|/)linuxrootfs(\d+)(?:/zImage)?$", val)
+        if m2:
+            return int(m2.group(1))
+    return None
+
+def process_pid(name):
+    try:
+        out = subprocess.check_output(["pidof", name], stderr=subprocess.DEVNULL, text=True).strip().split()
+        return int(out[0]) if out else None
+    except Exception:
+        return None
+
+def startup_for_slot(slot):
+    path = "/boot/STARTUP_%d" % int(slot)
+    text = read_text(path)
+    if not text:
+        return None
+    m = re.search(r"(?:^|[\s'\"])rootsubdir=([^\s'\"]+)", text)
+    if not m:
+        return None
+    sub = os.path.normpath(m.group(1).lstrip("/"))
+    if sub.startswith("../") or sub == ".." or sub.split("/")[-1] != "linuxrootfs%d" % int(slot):
+        return None
+    if not re.search(r"(?:^|[\s'\"])root=([^\s'\"]+)", text):
+        return None
+    if not re.search(r"(?:^|[\s'\"])kernel=([^\s'\"]+)", text):
+        return None
+    return path
+
+def fs_error_seen():
+    try:
+        out = subprocess.check_output(["dmesg"], stderr=subprocess.STDOUT, text=True)
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        low = line.lower()
+        if "ext4-fs (" in low and any(x in low for x in ("error", "abort", "corrupt", "journal")):
+            return line.strip()
+        if "jbd2:" in low and any(x in low for x in ("invalid checksum", "error", "abort", "corrupt")):
+            return line.strip()
+    return ""
+
+def set_startup_once(slot):
+    src = startup_for_slot(slot)
+    if not src:
+        raise RuntimeError("STARTUP_%d nicht sicher validierbar" % int(slot))
+    dst = "/boot/STARTUP_ONCE"
+    tmp = dst + ".safeupdate-new"
+    with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+        while True:
+            data = fsrc.read(65536)
+            if not data:
+                break
+            fdst.write(data)
+        fdst.flush()
+        os.fsync(fdst.fileno())
+    os.replace(tmp, dst)
+    subprocess.call(["sync"])
+
+def mark_healthy(plan):
+    plan["phase"] = "healthy"
+    plan["healthy_at"] = int(time.time())
+    save_plan(plan)
+    try:
+        os.replace(PLAN_FILE, PLAN_FILE + ".last-good")
+    except Exception:
+        try:
+            os.unlink(PLAN_FILE)
+        except Exception:
+            pass
+    subprocess.call(["sync"])
+    log("Erster Boot nach Update ist stabil. Recovery-Plan abgeschlossen.")
+
+def fallback(plan, reason):
+    source = int(plan.get("source_slot") or 0)
+    backup = int(plan.get("backup_slot") or 0)
+    if source <= 0 or backup <= 0 or source == backup:
+        log("Fallback blockiert: ungültige Slot-Zuordnung.")
+        return 2
+
+    bad = fs_error_seen()
+    if bad:
+        plan["phase"] = "blocked_fs_error"
+        plan["error"] = bad
+        plan["updated"] = int(time.time())
+        save_plan(plan)
+        log("Fallback blockiert: Dateisystemfehler erkannt: %s" % bad)
+        return 3
+
+    try:
+        set_startup_once(backup)
+    except Exception as e:
+        plan["phase"] = "fallback_failed"
+        plan["error"] = str(e)
+        plan["updated"] = int(time.time())
+        save_plan(plan)
+        log("Fallback konnte nicht vorbereitet werden: %s" % e)
+        return 4
+
+    plan["phase"] = "fallback"
+    plan["fallback_reason"] = reason
+    plan["updated"] = int(time.time())
+    save_plan(plan)
+    log("Enigma2 nicht stabil. Einmaliger Start auf Sicherheits-Slot %d vorbereitet." % backup)
+    subprocess.call(["sync"])
+    time.sleep(2)
+    subprocess.call(["reboot"])
+    return 0
+
+def main():
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+    if board() != "duo4kse":
+        log("Auto-Recovery nicht aktiv: Boxlayout nicht freigegeben.")
+        return 0
+
+    plan = load_plan()
+    if plan.get("version") != 2 or plan.get("phase") != "armed":
+        return 0
+
+    try:
+        source = int(plan.get("source_slot"))
+        backup = int(plan.get("backup_slot"))
+    except Exception:
+        log("Recovery-Plan ungültig.")
+        return 0
+
+    cur = current_slot()
+    if cur != source:
+        log("Recovery-Plan ignoriert: aktiver Slot %s ist nicht Quellslot %s." % (cur, source))
+        return 0
+    if not startup_for_slot(backup):
+        plan["phase"] = "fallback_failed"
+        plan["error"] = "Sicherheits-STARTUP fehlt oder ist ungültig."
+        plan["updated"] = int(time.time())
+        save_plan(plan)
+        log("Sicherheits-Slot kann nicht sicher gestartet werden.")
+        return 0
+
+    boot_start = time.time()
+    stable_since = None
+    last_pid = None
+    pid_changes = 0
+    log("Update-Boot wird überwacht: Quelle Slot %d, Sicherheits-Slot %d." % (source, backup))
+
+    while time.time() - boot_start < MAX_WAIT_SECONDS:
+        pid = process_pid("enigma2")
+        now = time.time()
+
+        if pid:
+            if stable_since is None:
+                stable_since = now
+            if last_pid is not None and pid != last_pid:
+                pid_changes += 1
+                stable_since = now
+                log("Enigma2 Neustart erkannt (%d/%d)." % (pid_changes, MAX_PID_CHANGES))
+            last_pid = pid
+
+            if now - stable_since >= STABLE_SECONDS:
+                mark_healthy(plan)
+                return 0
+        else:
+            if last_pid is not None:
+                pid_changes += 1
+                log("Enigma2 Prozess beendet (%d/%d)." % (pid_changes, MAX_PID_CHANGES))
+            last_pid = None
+            stable_since = None
+
+        if pid_changes >= MAX_PID_CHANGES:
+            return fallback(plan, "Enigma2 mehrfach abgestürzt/neugestartet")
+
+        time.sleep(5)
+
+    return fallback(plan, "Enigma2 wurde nach dem Update nicht stabil")
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    finally:
+        try:
+            os.unlink(PID_FILE)
+        except Exception:
+            pass
