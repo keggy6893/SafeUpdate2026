@@ -1,0 +1,587 @@
+name: Build SafeUpdate2026 r34 dev2
+
+on:
+  push:
+    branches: [r34-dev]
+    paths:
+      - '.r34-dev/build-trigger-dev2'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build r34 dev2 from r33
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r34build
+          mkdir -p /tmp/r34build
+          unzip -q SafeUpdate2026_2026.1-r33.zip -d /tmp/r34build
+
+          python3 - <<'PY'
+          import ast
+          import textwrap
+          from pathlib import Path
+
+          p = Path('/tmp/r34build/SafeUpdate2026/plugin.py')
+          s = p.read_text(encoding='utf-8')
+
+          old = 'PLUGIN_VERSION = "2026.1-r33"'
+          new = 'PLUGIN_VERSION = "2026.1-r34-dev2"'
+          if s.count(old) != 1:
+              raise SystemExit('unexpected r33 version marker count: %d' % s.count(old))
+          s = s.replace(old, new, 1)
+
+          def bounds_for(src, name):
+              tree = ast.parse(src)
+              nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+              if len(nodes) != 1:
+                  raise SystemExit('expected exactly one function %s, got %d' % (name, len(nodes)))
+              n = nodes[0]
+              lines = src.splitlines(True)
+              start = sum(len(x) for x in lines[:n.lineno - 1])
+              end = sum(len(x) for x in lines[:n.end_lineno])
+              return n, start, end
+
+          def replace_function(src, name, body):
+              n, start, end = bounds_for(src, name)
+              repl = textwrap.indent(textwrap.dedent(body).strip('\n') + '\n', ' ' * n.col_offset)
+              return src[:start] + repl + src[end:]
+
+          start_update = r'''
+          def start_update(self):
+              if self.busy:
+                  self.session.open(
+                      MessageBox,
+                      "Update ist gesperrt, solange ein Sicherheitsvorgang läuft.",
+                      MessageBox.TYPE_INFO,
+                  )
+                  return
+              if not self.backup_verified:
+                  self.session.open(MessageBox, "Update bleibt gesperrt, bis ein Backup erfolgreich verifiziert wurde.", MessageBox.TYPE_INFO)
+                  return
+              if not kexec_ok():
+                  self.session.open(MessageBox, "KEXEC-Kernel ist nicht korrekt. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                  return
+              if not holds_ok():
+                  if is_gbtrio4k():
+                      self.append_log("> Setze GigaBlue Kernel-Pakete auf HOLD...")
+                      if not ensure_kernel_holds():
+                          self.session.open(MessageBox, "GigaBlue Kernel-Pakete konnten nicht sicher auf HOLD gesetzt werden. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                          return
+                      self.refresh_status()
+                  else:
+                      self.session.open(MessageBox, "Nicht alle Kernel-Pakete stehen auf HOLD. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                      return
+
+              preflight_ok, preflight_text = safeupdate_dev2_update_preflight()
+              if not preflight_ok:
+                  self.append_log("> UPDATE-PREFLIGHT BLOCKIERT: " + str(preflight_text))
+                  self.session.open(
+                      MessageBox,
+                      "SafeUpdate hat vor dem Update ein Sicherheitsproblem erkannt.\n\n%s\n\n"
+                      "Das Update wurde NICHT gestartet." % preflight_text,
+                      MessageBox.TYPE_ERROR,
+                  )
+                  return
+
+              self.append_log("> UPDATE-PREFLIGHT: " + str(preflight_text))
+              self.session.openWithCallback(
+                  self.do_update,
+                  MessageBox,
+                  "Backup und Multiboot-Schutz sind verifiziert.\n\n"
+                  "SafeUpdate überwacht den ersten Neustart automatisch.\n"
+                  "Falls Enigma2 danach mehrfach abstürzt, wird der Sicherheits-Slot automatisch gestartet.\n\n"
+                  "OpenATV jetzt aktualisieren?",
+                  MessageBox.TYPE_YESNO,
+              )
+          '''
+
+          update_closed = r'''
+          def update_closed(self, rc):
+              self.busy = False
+              self.append_log("> Update-Prozess beendet. RC=%s" % rc)
+              guard_ok = True
+              if (not is_gbtrio4k()) and os.path.isfile("/usr/local/sbin/kexec-guard.sh"):
+                  guard_ok = subprocess.call(["/usr/local/sbin/kexec-guard.sh"]) == 0
+              self.refresh_status()
+              if rc == 0 and guard_ok and kexec_ok():
+                  post_update_rotation_delay()
+                  recovery_ok, recovery_text = safeupdate_dev2_prepare_recovery_plan()
+                  if not recovery_ok:
+                      self.append_log("> AUTO-RECOVERY NICHT BEREIT: " + str(recovery_text))
+                      self.session.open(
+                          MessageBox,
+                          "Update ist abgeschlossen, aber SafeUpdate konnte den automatischen Recovery-Pfad nicht sicher vorbereiten.\n\n"
+                          "%s\n\nBitte noch NICHT neu starten." % recovery_text,
+                          MessageBox.TYPE_ERROR,
+                      )
+                      return
+                  self.append_log("> Sicherheitsprüfung: OK")
+                  self.append_log("> Auto-Recovery: " + str(recovery_text))
+                  self.append_log("> Auto-Rotation: Vor-Update-Backup bleibt mindestens 24h erhalten.")
+                  self.session.open(
+                      MessageBox,
+                      "Update abgeschlossen.\nKEXEC-Schutz und Recovery-Pfad sind bereit.\n\n"
+                      "Beim nächsten Start prüft SafeUpdate automatisch, ob Enigma2 stabil läuft.\n"
+                      "Bei einer Crash-Schleife wird automatisch der Sicherheits-Slot gestartet.\n\n"
+                      "Neustart anschließend normal über das Menü.",
+                      MessageBox.TYPE_INFO,
+                  )
+              else:
+                  self.append_log("> WARNUNG: Update/Sicherheitsprüfung nicht sauber beendet.")
+                  self.session.open(MessageBox, "Update oder Sicherheitsprüfung meldet einen Fehler.\nBitte NICHT neu starten, bevor die Details geprüft wurden.", MessageBox.TYPE_ERROR)
+          '''
+
+          s = replace_function(s, 'start_update', start_update)
+          s = replace_function(s, 'update_closed', update_closed)
+
+          helpers = r'''
+          # --- r34-dev2 automatic recovery / filesystem preflight ---
+          import json as _safeupdate_json
+
+          SAFEUPDATE_RECOVERY_PLAN = "/boot/.safeupdate2026-recovery.json"
+
+          def safeupdate_dev2_board():
+              try:
+                  return read_text("/proc/device-tree/bolt/board").replace("\x00", "").strip().lower()
+              except Exception:
+                  return ""
+
+          def safeupdate_dev2_plan_load():
+              try:
+                  with open(SAFEUPDATE_RECOVERY_PLAN, "r") as f:
+                      data = _safeupdate_json.load(f)
+                  return data if isinstance(data, dict) else {}
+              except Exception:
+                  return {}
+
+          def safeupdate_dev2_write_json(path, data):
+              tmp = path + ".tmp"
+              try:
+                  parent = os.path.dirname(path)
+                  if parent and not os.path.isdir(parent):
+                      os.makedirs(parent)
+                  with open(tmp, "w") as f:
+                      _safeupdate_json.dump(data, f, indent=2, sort_keys=True)
+                      f.write("\n")
+                      f.flush()
+                      os.fsync(f.fileno())
+                  os.rename(tmp, path)
+                  subprocess.call(["sync"])
+                  return True
+              except Exception:
+                  try:
+                      if os.path.exists(tmp):
+                          os.unlink(tmp)
+                  except Exception:
+                      pass
+                  return False
+
+          def safeupdate_dev2_fs_error(rootdev):
+              base = os.path.basename(os.path.realpath(rootdev or ""))
+              if not base:
+                  return "Root-Dateisystem konnte nicht eindeutig bestimmt werden."
+              try:
+                  out = subprocess.check_output(["dmesg"], stderr=subprocess.STDOUT)
+                  if not isinstance(out, str):
+                      out = out.decode("utf-8", "replace")
+              except Exception:
+                  out = ""
+              for line in out.splitlines():
+                  low = line.lower()
+                  if ("ext4-fs (%s)" % base).lower() in low and any(x in low for x in ("error", "abort", "corrupt", "journal")):
+                      return line.strip()
+                  if "jbd2:" in low and any(x in low for x in ("invalid checksum", "error", "abort", "corrupt")):
+                      return line.strip()
+              try:
+                  out = subprocess.check_output(["tune2fs", "-l", rootdev], stderr=subprocess.STDOUT)
+                  if not isinstance(out, str):
+                      out = out.decode("utf-8", "replace")
+                  for line in out.splitlines():
+                      if line.lower().startswith("filesystem state:") and "error" in line.lower():
+                          return line.strip()
+              except Exception:
+                  pass
+              return ""
+
+          def safeupdate_dev2_update_preflight():
+              cur = current_slot()
+              if cur is None:
+                  return False, "Aktiver Slot konnte nicht eindeutig erkannt werden."
+              infos = startup_slots()
+              info = infos.get(cur)
+              if not info:
+                  return False, "STARTUP_%d ist nicht eindeutig verifizierbar." % cur
+              rootdev = os.path.realpath(info.get("root_device") or "")
+              if not rootdev or not os.path.exists(rootdev):
+                  return False, "Multiboot-Rootgerät ist nicht erreichbar."
+
+              fs_problem = safeupdate_dev2_fs_error(rootdev)
+              if fs_problem:
+                  return False, "Dateisystem-/Journalfehler erkannt: %s" % fs_problem
+
+              mp = ensure_full_mount(False)
+              if not mp:
+                  return False, "Multiboot-Dateisystem kann nicht vollständig gelesen werden."
+              src = active_source_path(mp)
+              if not src or not slot_root_tree_valid(src):
+                  return False, "Aktiver Slot ist physisch nicht vollständig verifizierbar."
+
+              state = physically_verified_rotation_state()
+              if state is None or not state.get("verified"):
+                  return False, "Sicherheitsbackup ist physisch nicht mehr verifizierbar."
+
+              mode = state.get("backup_mode", "slot")
+              if mode == "slot":
+                  try:
+                      source = int(state.get("source_slot"))
+                      target = int(state.get("target_slot"))
+                  except Exception:
+                      return False, "Backup-Zuordnung ist ungültig."
+                  if source != cur or target == cur:
+                      return False, "Backup-Zuordnung passt nicht zum laufenden Slot."
+                  target_info = infos.get(target)
+                  if not target_info or os.path.realpath(target_info.get("root_device") or "") != rootdev:
+                      return False, "Sicherheits-Slot liegt nicht eindeutig auf demselben Multiboot-Dateisystem."
+                  target_path = os.path.join(mp, target_info.get("rootsubdir") or "")
+                  if not slot_backup_valid(target, target_path, state.get("kernel_sha256", "")):
+                      return False, "Sicherheits-Slot ist nicht mehr vollständig verifiziert."
+
+              old_plan = safeupdate_dev2_plan_load()
+              if old_plan.get("phase") in ("armed", "fallback", "restoring"):
+                  return False, "Es existiert noch ein aktiver Recovery-Vorgang. Neuer Update-Lauf bleibt gesperrt."
+
+              if safeupdate_dev2_board() == "duo4kse" and mode == "slot":
+                  for needed in ("/usr/bin/safeupdate-recover", "/usr/bin/safeupdate-bootguard", "/etc/init.d/safeupdate-bootguard"):
+                      if not os.path.exists(needed):
+                          return False, "Recovery-Komponente fehlt: %s" % needed
+                  return True, "Dateisystem, Backup, Bootpfad und Auto-Recovery sind bereit."
+
+              return True, "Dateisystem, Backup und Bootpfad sind verifiziert."
+
+          def safeupdate_dev2_copy_runtime_to_backup(backup_dir):
+              plugin_src = os.path.dirname(os.path.realpath(__file__))
+              plugin_dst = os.path.join(backup_dir, "usr", "lib", "enigma2", "python", "Plugins", "Extensions", "SafeUpdate2026")
+              if not os.path.isdir(plugin_dst):
+                  os.makedirs(plugin_dst)
+              rc = subprocess.call(["cp", "-a", plugin_src + "/.", plugin_dst + "/"])
+              if rc != 0:
+                  return False
+
+              files = (
+                  ("/usr/bin/safeupdate-recover", os.path.join(backup_dir, "usr", "bin", "safeupdate-recover"), 0o755),
+                  ("/usr/bin/safeupdate-bootguard", os.path.join(backup_dir, "usr", "bin", "safeupdate-bootguard"), 0o755),
+                  ("/etc/init.d/safeupdate-bootguard", os.path.join(backup_dir, "etc", "init.d", "safeupdate-bootguard"), 0o755),
+              )
+              for src, dst, mode in files:
+                  if not os.path.isfile(src):
+                      return False
+                  parent = os.path.dirname(dst)
+                  if not os.path.isdir(parent):
+                      os.makedirs(parent)
+                  if subprocess.call(["cp", "-a", src, dst]) != 0:
+                      return False
+                  os.chmod(dst, mode)
+
+              for rcdir in ("rcS.d", "rc3.d", "rc4.d", "rc5.d"):
+                  d = os.path.join(backup_dir, "etc", rcdir)
+                  if not os.path.isdir(d):
+                      continue
+                  link = os.path.join(d, "S99safeupdate-bootguard")
+                  try:
+                      if os.path.lexists(link):
+                          os.unlink(link)
+                      os.symlink("../init.d/safeupdate-bootguard", link)
+                  except Exception:
+                      return False
+              return (
+                  os.path.isfile(os.path.join(plugin_dst, "plugin.py")) and
+                  os.path.isfile(os.path.join(backup_dir, "usr", "bin", "safeupdate-recover")) and
+                  os.path.isfile(os.path.join(backup_dir, "usr", "bin", "safeupdate-bootguard"))
+              )
+
+          def safeupdate_dev2_prepare_recovery_plan():
+              if safeupdate_dev2_board() != "duo4kse":
+                  return True, "Automatischer Crash-Fallback ist auf diesem Boxlayout noch nicht aktiviert."
+
+              state = physically_verified_rotation_state()
+              if state is None or state.get("backup_mode", "slot") != "slot":
+                  return False, "Für automatisches Recovery wird ein verifizierter bootbarer Sicherheits-Slot benötigt."
+
+              try:
+                  source = int(state.get("source_slot"))
+                  backup = int(state.get("target_slot"))
+              except Exception:
+                  return False, "Recovery-Slotzuordnung ist ungültig."
+
+              cur = current_slot()
+              if cur != source or source <= 0 or backup <= 0 or source == backup:
+                  return False, "Recovery-Slotzuordnung passt nicht zum laufenden Slot."
+
+              infos = startup_slots()
+              src_info = infos.get(source)
+              backup_info = infos.get(backup)
+              if not src_info or not backup_info:
+                  return False, "STARTUP-Zuordnung für Quell-/Sicherheits-Slot fehlt."
+              if os.path.realpath(src_info.get("root_device") or "") != os.path.realpath(backup_info.get("root_device") or ""):
+                  return False, "Quell- und Sicherheits-Slot liegen nicht auf demselben Rootgerät."
+
+              fs_problem = safeupdate_dev2_fs_error(src_info.get("root_device"))
+              if fs_problem:
+                  return False, "Dateisystem-/Journalfehler erkannt: %s" % fs_problem
+
+              mp = ensure_full_mount(True)
+              if not mp:
+                  return False, "Multiboot-Dateisystem kann nicht schreibbar geöffnet werden."
+              backup_dir = os.path.join(mp, backup_info.get("rootsubdir") or "")
+              if not slot_backup_valid(backup, backup_dir, state.get("kernel_sha256", "")):
+                  return False, "Sicherheits-Slot ist vor Recovery-Vorbereitung nicht mehr verifiziert."
+
+              if not safeupdate_dev2_copy_runtime_to_backup(backup_dir):
+                  return False, "Recovery-Laufzeit konnte nicht sicher in den Sicherheits-Slot gespiegelt werden."
+
+              if not slot_backup_valid(backup, backup_dir, state.get("kernel_sha256", "")):
+                  return False, "Sicherheits-Slot ist nach Recovery-Vorbereitung nicht mehr verifiziert."
+
+              now = int(time.time())
+              plan = {
+                  "version": 2,
+                  "phase": "armed",
+                  "source_slot": source,
+                  "backup_slot": backup,
+                  "created": now,
+                  "updated": now,
+                  "plugin_version": PLUGIN_VERSION,
+                  "root_spec": backup_info.get("root_spec", ""),
+                  "kernel_sha256": state.get("kernel_sha256", ""),
+              }
+
+              marker = os.path.join(backup_dir, "etc", "safeupdate2026-recovery.json")
+              if not safeupdate_dev2_write_json(marker, plan):
+                  return False, "Recovery-Marker konnte nicht in den Sicherheits-Slot geschrieben werden."
+              if not safeupdate_dev2_write_json(SAFEUPDATE_RECOVERY_PLAN, plan):
+                  return False, "Gemeinsamer Recovery-Plan konnte nicht geschrieben werden."
+
+              subprocess.call(["sync"])
+              return True, "Auto-Recovery ist scharf: Slot %d -> Sicherheits-Slot %d." % (source, backup)
+
+          def safeupdate_dev2_maybe_offer_recovery(session):
+              plan = safeupdate_dev2_plan_load()
+              if plan.get("version") != 2:
+                  return
+              phase = plan.get("phase")
+              try:
+                  source = int(plan.get("source_slot"))
+                  backup = int(plan.get("backup_slot"))
+              except Exception:
+                  return
+              cur = current_slot()
+
+              if phase == "fallback" and cur == backup:
+                  def _answer(yes):
+                      if not yes:
+                          return
+                      helper = "/usr/bin/safeupdate-recover"
+                      if not os.path.isfile(helper):
+                          session.open(MessageBox, "Recovery-Helfer fehlt. Sicherheits-Slot bleibt unverändert aktiv.", MessageBox.TYPE_ERROR)
+                          return
+                      try:
+                          subprocess.Popen([helper, "--restore-auto-reboot"], close_fds=True)
+                          session.open(
+                              MessageBox,
+                              "Wiederherstellung läuft automatisch.\n\n"
+                              "Sicherheits-Slot %d bleibt aktiv, bis Slot %d vollständig geprüft zurückgeschrieben wurde.\n"
+                              "Danach startet die Box automatisch neu." % (backup, source),
+                              MessageBox.TYPE_INFO,
+                          )
+                      except Exception as e:
+                          session.open(MessageBox, "Wiederherstellung konnte nicht gestartet werden: %s" % e, MessageBox.TYPE_ERROR)
+
+                  session.openWithCallback(
+                      _answer,
+                      MessageBox,
+                      "SAFE UPDATE 2026\n\n"
+                      "Das letzte Update konnte Enigma2 nicht stabil starten.\n"
+                      "Der verifizierte Sicherheits-Slot %d läuft bereits.\n\n"
+                      "Slot %d jetzt automatisch wiederherstellen?\n\n"
+                      "GRÜN = Wiederherstellen    ROT = Abbrechen" % (backup, source),
+                      MessageBox.TYPE_YESNO,
+                  )
+              elif phase in ("restore_failed", "blocked_fs_error", "fallback_failed") and cur == backup:
+                  session.open(
+                      MessageBox,
+                      "SAFE UPDATE 2026\n\n"
+                      "Die automatische Wiederherstellung wurde aus Sicherheitsgründen gestoppt.\n"
+                      "Der Sicherheits-Slot bleibt aktiv; es wird nichts weiter überschrieben.\n\n"
+                      "Status: %s" % phase,
+                      MessageBox.TYPE_ERROR,
+                  )
+          '''
+
+          # Insert module-level dev2 helpers immediately before the existing session-start hook.
+          n, start, end = bounds_for(s, 'rotation_sessionstart')
+          s = s[:start] + textwrap.dedent(helpers).strip('\n') + '\n\n' + s[start:]
+
+          # Add the recovery popup to the beginning of the session-start hook.
+          n, start, end = bounds_for(s, 'rotation_sessionstart')
+          seg = s[start:end]
+          lines = seg.splitlines(True)
+          indent = ' ' * (n.col_offset + 4)
+          injected = (
+              indent + 'session = kwargs.get("session")\n' +
+              indent + 'if reason == 0 and session is not None:\n' +
+              indent + '    safeupdate_dev2_maybe_offer_recovery(session)\n'
+          )
+          seg = lines[0] + injected + ''.join(lines[1:])
+          s = s[:start] + seg + s[end:]
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          cp .r34-dev/safeupdate-recover /tmp/r34build/SafeUpdate2026/safeupdate-recover
+          cp .r34-dev/safeupdate-bootguard /tmp/r34build/SafeUpdate2026/safeupdate-bootguard
+          cp .r34-dev/safeupdate-bootguard.init /tmp/r34build/SafeUpdate2026/safeupdate-bootguard.init
+          chmod 0755 /tmp/r34build/SafeUpdate2026/safeupdate-recover
+          chmod 0755 /tmp/r34build/SafeUpdate2026/safeupdate-bootguard
+          chmod 0755 /tmp/r34build/SafeUpdate2026/safeupdate-bootguard.init
+
+          cat > /tmp/r34build/SafeUpdate2026/README-r34-dev2.txt <<'EOF'
+          SafeUpdate2026 2026.1-r34-dev2
+          ===============================
+
+          Ziel: Recovery fuer normale Nutzer ohne Telnet-Schrittfolge.
+
+          r34-dev2:
+          - vor Update automatischer Multiboot-/Dateisystem-/Backup-Preflight
+          - EXT4/JBD2-Kernelfehler blockieren das Update
+          - nach erfolgreichem Update Recovery-Plan in /boot
+          - Recovery-Laufzeit wird in den verifizierten Sicherheits-Slot gespiegelt
+          - VU+ Duo 4K SE: externer BootGuard ueberwacht den ersten Start nach Update
+          - Enigma2 Crash-Schleife -> einmaliger automatischer Start des Sicherheits-Slots
+          - Sicherheits-Slot zeigt automatisch eine JA/NEIN-Wiederherstellung an
+          - Wiederherstellung arbeitet nur auf dem inaktiven Quellslot
+          - temporäre Doppelkopie + Verifikation, bevor der defekte Slot ersetzt wird
+          - nach erfolgreicher Wiederherstellung STARTUP_ONCE zurueck auf den Quellslot
+
+          WICHTIG:
+          - automatischer Crash-Fallback in dev2 ist nur fuer das validierte VU+ Duo 4K SE Layout aktiviert
+          - separate Kernelpartitionen bleiben im Recovery-Helfer weiterhin blockiert
+          - Dateisystemreparatur (fsck) wird NICHT automatisch auf einem gemounteten Rootgeraet ausgefuehrt
+          EOF
+          sed -i 's/^          //' /tmp/r34build/SafeUpdate2026/README-r34-dev2.txt
+
+          python3 -m py_compile             /tmp/r34build/SafeUpdate2026/plugin.py             /tmp/r34build/SafeUpdate2026/safeupdate-recover             /tmp/r34build/SafeUpdate2026/safeupdate-bootguard
+
+          python3 - <<'PY'
+          import ast
+          import importlib.util
+          import pathlib
+
+          plugin = pathlib.Path('/tmp/r34build/SafeUpdate2026/plugin.py')
+          ps = plugin.read_text(encoding='utf-8')
+          tree = ast.parse(ps)
+          funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+          required = (
+              'safeupdate_dev2_update_preflight',
+              'safeupdate_dev2_prepare_recovery_plan',
+              'safeupdate_dev2_maybe_offer_recovery',
+              'start_update',
+              'update_closed',
+              'rotation_sessionstart',
+          )
+          for name in required:
+              if name not in funcs:
+                  raise SystemExit('missing dev2 function: ' + name)
+
+          if 'safeupdate_dev2_update_preflight()' not in ast.get_source_segment(ps, funcs['start_update']):
+              raise SystemExit('start_update is missing dev2 preflight')
+          if 'safeupdate_dev2_prepare_recovery_plan()' not in ast.get_source_segment(ps, funcs['update_closed']):
+              raise SystemExit('update_closed is missing recovery arming')
+          if 'safeupdate_dev2_maybe_offer_recovery(session)' not in ast.get_source_segment(ps, funcs['rotation_sessionstart']):
+              raise SystemExit('sessionstart is missing recovery popup hook')
+
+          markers = (
+              'Dateisystem-/Journalfehler erkannt',
+              'SAFEUPDATE_RECOVERY_PLAN',
+              'S99safeupdate-bootguard',
+              '--restore-auto-reboot',
+              'GRÜN = Wiederherstellen',
+          )
+          for m in markers:
+              if m not in ps:
+                  raise SystemExit('missing plugin safety marker: %r' % m)
+
+          helper_path = '/tmp/r34build/SafeUpdate2026/safeupdate-recover'
+          spec = importlib.util.spec_from_file_location('safeupdate_recover_dev2', helper_path)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          if mod.safe_rootsubdir('duo4kse/linuxrootfs8', 8) != 'duo4kse/linuxrootfs8':
+              raise SystemExit('VU prefixed rootsubdir regression')
+          if mod.safe_rootsubdir('linuxrootfs8', 8) != 'linuxrootfs8':
+              raise SystemExit('plain rootsubdir regression')
+          if mod.safe_rootsubdir('../linuxrootfs8', 8):
+              raise SystemExit('unsafe rootsubdir accepted')
+
+          bs = pathlib.Path('/tmp/r34build/SafeUpdate2026/safeupdate-bootguard').read_text(encoding='utf-8')
+          for m in ('STABLE_SECONDS = 120', 'MAX_PID_CHANGES = 3', 'set_startup_once(backup)', 'blocked_fs_error', 'board() != "duo4kse"'):
+              if m not in bs:
+                  raise SystemExit('missing bootguard marker: %r' % m)
+
+          print('r34 dev2 static safety checks: OK')
+          PY
+
+          rm -rf /tmp/r34build/SafeUpdate2026/__pycache__
+          find /tmp/r34build/SafeUpdate2026 -name '*.pyc' -delete 2>/dev/null || true
+          rm -f SafeUpdate2026_2026.1-r34-dev2.zip
+          cd /tmp/r34build
+          zip -q -r "$GITHUB_WORKSPACE/SafeUpdate2026_2026.1-r34-dev2.zip" SafeUpdate2026
+          cd "$GITHUB_WORKSPACE"
+
+          SHA="$(sha256sum SafeUpdate2026_2026.1-r34-dev2.zip | awk '{print $1}')"
+          python3 - "$SHA" <<'PY'
+          import json, sys
+          sha = sys.argv[1]
+          data = {
+            "version": "2026.1-r34-dev2",
+            "mode": "full",
+            "download": "https://raw.githubusercontent.com/keggy6893/SafeUpdate2026/r34-dev/SafeUpdate2026_2026.1-r34-dev2.zip",
+            "sha256": sha,
+            "plugin_dir": "/usr/lib/enigma2/python/Plugins/Extensions/SafeUpdate2026"
+          }
+          with open('latest-r34-test.json', 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          PY
+          printf '%s  %s\n' "$SHA" 'SafeUpdate2026_2026.1-r34-dev2.zip' > r34-dev-sha256.txt
+
+      - name: Publish r34 dev2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SafeUpdate2026_2026.1-r34-dev2.zip latest-r34-test.json r34-dev-sha256.txt
+          if git diff --cached --quiet; then
+            echo 'No publish changes.'
+          else
+            git commit -m 'Publish r34 dev2 automatic recovery test build'
+            git push origin HEAD:r34-dev
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeUpdate2026_2026.1-r34-dev2
+          path: |
+            SafeUpdate2026_2026.1-r34-dev2.zip
+            r34-dev-sha256.txt
+          if-no-files-found: error
