@@ -725,6 +725,37 @@ def free_slots():
             result.append(slot)
     return result
 
+### gigablue_kernel_layout_ok
+def gigablue_kernel_layout_ok():
+    if not is_gbtrio4k():
+        return False
+    slot = current_slot()
+    if slot not in GBTRIO4K_KERNEL_DEVICES:
+        return False
+    if os.path.realpath(root_device() or "") != os.path.realpath(GBTRIO4K_ROOT_DEVICE):
+        return False
+    if active_kernel_device() != expected_kernel_device(slot):
+        return False
+    slots = startup_slots()
+    for number, device in sorted(GBTRIO4K_KERNEL_DEVICES.items()):
+        info = slots.get(number)
+        if not info:
+            return False
+        if info.get("rootsubdir") != "linuxrootfs%d" % number:
+            return False
+        if os.path.realpath(info.get("root_device") or "") != os.path.realpath(GBTRIO4K_ROOT_DEVICE):
+            return False
+        if os.path.realpath(info.get("kernel_device") or "") != os.path.realpath(device):
+            return False
+    return True
+
+### kexec_ok
+def kexec_ok():
+    # VU+ retains its established KEXEC hash check. GigaBlue verifies native kernel slots.
+    if is_gbtrio4k():
+        return gigablue_kernel_layout_ok()
+    return sha256_prefix(KEXEC_DEVICE, KEXEC_SIZE) == KEXEC_GOOD_HASH
+
 ### kernel_device_for_slot
 def kernel_device_for_slot(slot):
     try:
@@ -752,6 +783,14 @@ def slot_backup_valid(slot, path, expected_kernel_hash=""):
     source_dev = active_kernel_device()
     source_hash = sha256_prefix(source_dev) if source_dev else ""
     return bool(source_hash and target_hash == source_hash)
+
+### hdd_ok
+def hdd_ok():
+    for line in read_text("/proc/mounts").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "/media/usb":
+            return True
+    return False
 
 ### internal_backup_base
 def internal_backup_base(mountpoint):
@@ -885,6 +924,10 @@ def discover_internal_backups(mountpoint=None):
     result.sort(key=lambda x: str(x.get("created_sort", "")), reverse=True)
     return result
 
+### holds_ok
+def holds_ok():
+    return all(package_on_hold(p) for p in kernel_packages())
+
 ### load_state
 def load_state():
     try:
@@ -999,6 +1042,20 @@ def ensure_rotation_state(state):
             result["system_fingerprint"] = current_system_fingerprint()
         persist_rotation_state(result)
     return result
+
+### post_update_rotation_delay
+def post_update_rotation_delay():
+    state = physically_verified_rotation_state()
+    if state is None or not state.get("rotation_enabled", False):
+        return
+    now = int(time.time())
+    state["rotation_last_check"] = now
+    state["rotation_last_error"] = ""
+    state["rotation_post_update_hold_until"] = now + ROTATION_INTERVAL
+    state["rotation_next_due"] = now + ROTATION_INTERVAL
+    # Intentionally keep the OLD fingerprint. In 24h it will differ from the
+    # updated system and rotate only then, preserving the pre-update rollback.
+    persist_rotation_state(state)
 
 ### _start_slot_rotation
 def _start_slot_rotation(self, state, fingerprint, ui):
@@ -1313,6 +1370,30 @@ def startup(self):
         self.paint_update_state()
         self.paint_nav_focus()
 
+### update_box_identity
+def update_box_identity(self):
+        brand, model = detect_box_identity()
+        display = (brand + (" " + model if model else "")).strip()
+        if _USE_CLASSIC_VU_DUO4KSE:
+            # The classic VU+ Duo 4K SE header is already part of the approved artwork.
+            self["boxHeader"].setText("")
+        else:
+            self["boxHeader"].setText("%s  •  Multiboot Schutz" % display)
+        self.append_log("> Receiver erkannt: %s" % display)
+
+### update_clock
+def update_clock(self):
+        now = datetime.now()
+        self["clock"].setText(now.strftime("%H:%M"))
+        weekdays = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+        months = ("Jan.", "Feb.", "Mär.", "Apr.", "Mai", "Jun.", "Jul.", "Aug.", "Sep.", "Okt.", "Nov.", "Dez.")
+        self["date"].setText("%s, %d. %s %d" % (
+            weekdays[now.weekday()],
+            now.day,
+            months[now.month - 1],
+            now.year
+        ))
+
 ### refresh_slots
 def refresh_slots(self):
         previous = None
@@ -1333,6 +1414,17 @@ def refresh_slots(self):
             self["targetSlot"].setText("Internes eMMC")
             self.append_log("> Kein freier Multiboot-Slot – verwende internes eMMC-Sicherheitsbackup.")
             self.append_log("> Vorhandene Slots und Recovery werden nicht überschrieben.")
+
+### nav_ok
+def nav_ok(self):
+        if self.busy:
+            return
+        if self.nav_focus == 6:
+            self.start_update()
+        elif self.nav_focus in (0, 1, 2, 3):
+            self.show_details()
+        else:
+            self.start_backup()
 
 ### prev_slot
 def prev_slot(self):
@@ -2461,3 +2553,70 @@ echo 'RESTORE_VERIFIED'
 
         self.connect_container(self.restore_data, self.restore_closed)
         self.container.execute("/bin/sh -c %s" % shq(script))
+
+### start_update
+def start_update(self):
+        if self.busy:
+            self.session.open(
+                MessageBox,
+                "Update ist gesperrt, solange ein Sicherheitsvorgang läuft.",
+                MessageBox.TYPE_INFO,
+            )
+            return
+        if not self.backup_verified:
+            self.session.open(MessageBox, "Update bleibt gesperrt, bis ein Backup erfolgreich verifiziert wurde.", MessageBox.TYPE_INFO)
+            return
+        if not kexec_ok():
+            self.session.open(MessageBox, "KEXEC-Kernel ist nicht korrekt. Update wird blockiert.", MessageBox.TYPE_ERROR)
+            return
+        if not holds_ok():
+            if is_gbtrio4k():
+                self.append_log("> Setze GigaBlue Kernel-Pakete auf HOLD...")
+                if not ensure_kernel_holds():
+                    self.session.open(MessageBox, "GigaBlue Kernel-Pakete konnten nicht sicher auf HOLD gesetzt werden. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                    return
+                self.refresh_status()
+            else:
+                self.session.open(MessageBox, "Nicht alle Kernel-Pakete stehen auf HOLD. Update wird blockiert.", MessageBox.TYPE_ERROR)
+                return
+        self.session.openWithCallback(self.do_update, MessageBox, "Backup ist verifiziert.\n\nOpenATV jetzt mit opkg update && opkg upgrade aktualisieren?", MessageBox.TYPE_YESNO)
+
+### do_update
+def do_update(self, yes):
+        if not yes:
+            return
+        self.busy = True
+        self.append_log("> opkg update")
+        hold_cmd = "; ".join("opkg flag hold %s >/dev/null 2>&1 || true" % shq(p) for p in kernel_packages())
+        cmd = "set -e; %s; opkg update; echo __SAFEUPDATE_UPGRADE__; opkg upgrade" % hold_cmd
+        self.connect_container(self.update_data, self.update_closed)
+        self.container.execute("/bin/sh -c %s" % shq(cmd))
+
+### update_data
+def update_data(self, data):
+        try:
+            txt = data.decode("utf-8", "replace")
+        except Exception:
+            txt = str(data)
+        for line in txt.splitlines():
+            if line == "__SAFEUPDATE_UPGRADE__":
+                self.append_log("> opkg upgrade")
+            else:
+                self.append_log("> " + line[:120])
+
+### update_closed
+def update_closed(self, rc):
+        self.busy = False
+        self.append_log("> Update-Prozess beendet. RC=%s" % rc)
+        guard_ok = True
+        if (not is_gbtrio4k()) and os.path.isfile("/usr/local/sbin/kexec-guard.sh"):
+            guard_ok = subprocess.call(["/usr/local/sbin/kexec-guard.sh"]) == 0
+        self.refresh_status()
+        if rc == 0 and guard_ok and kexec_ok():
+            post_update_rotation_delay()
+            self.append_log("> Sicherheitsprüfung: OK")
+            self.append_log("> Auto-Rotation: Vor-Update-Backup bleibt mindestens 24h erhalten.")
+            self.session.open(MessageBox, "Update abgeschlossen.\nKEXEC-Schutz ist weiterhin OK.\n\nNeustart bitte anschließend manuell ausführen.", MessageBox.TYPE_INFO)
+        else:
+            self.append_log("> WARNUNG: Update/Sicherheitsprüfung nicht sauber beendet.")
+            self.session.open(MessageBox, "Update oder Sicherheitsprüfung meldet einen Fehler.\nBitte NICHT neu starten, bevor die Details geprüft wurden.", MessageBox.TYPE_ERROR)
