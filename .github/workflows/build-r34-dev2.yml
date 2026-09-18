@@ -482,7 +482,7 @@ jobs:
 
           python3 - <<'PY'
           import ast
-          import importlib.util
+          import importlib.machinery
           import pathlib
 
           plugin = pathlib.Path('/tmp/r34build/SafeUpdate2026/plugin.py')
@@ -521,9 +521,8 @@ jobs:
                   raise SystemExit('missing plugin safety marker: %r' % m)
 
           helper_path = '/tmp/r34build/SafeUpdate2026/safeupdate-recover'
-          spec = importlib.util.spec_from_file_location('safeupdate_recover_dev2', helper_path)
-          mod = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(mod)
+          loader = importlib.machinery.SourceFileLoader('safeupdate_recover_dev2', helper_path)
+          mod = loader.load_module()
           if mod.safe_rootsubdir('duo4kse/linuxrootfs8', 8) != 'duo4kse/linuxrootfs8':
               raise SystemExit('VU prefixed rootsubdir regression')
           if mod.safe_rootsubdir('linuxrootfs8', 8) != 'linuxrootfs8':
