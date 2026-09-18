@@ -1,0 +1,2463 @@
+PLUGIN VERSION
+PLUGIN_VERSION = "2026.1-r33"
+
+STRING PATHS / STATE KEYS
+STATE_FILE = "/etc/enigma2/safeupdate2026.json"
+INTERNAL_BACKUP_DIRNAME = "safeupdate2026"
+INTERNAL_BACKUP_META = "backup.json"
+ROTATION_INTERVAL = 24 * 60 * 60
+ROTATION_RETRY_INTERVAL = 60 * 60
+ROTATION_TICK_MS = 30 * 60 * 1000
+ROTATION_NEW_SUFFIX = ".safeupdate-new"
+ROTATION_OLD_SUFFIX = ".safeupdate-old"
+ROTATION_NEW_KERNEL_SUFFIX = ".safeupdate-new-kernel.img"
+ROTATION_OLD_KERNEL_SUFFIX = ".safeupdate-old-kernel.img"
+def slot_backup_valid(slot, path, expected_kernel_hash=""):
+def internal_backup_base(mountpoint):
+return os.path.join(mountpoint, INTERNAL_BACKUP_DIRNAME)
+def internal_backup_dir(source_slot, mountpoint):
+return os.path.join(internal_backup_base(mountpoint), "slot%d" % source_slot)
+def internal_backup_path_is_safe(path, source_slot, mountpoint):
+expected = internal_backup_dir(source_slot, mountpoint)
+base = internal_backup_base(mountpoint)
+def validate_internal_backup_state(state, mountpoint=None):
+if not isinstance(state, dict):
+if state.get("backup_mode") != "internal" or not state.get("verified"):
+source = int(state.get("source_slot"))
+backup_dir = internal_backup_dir(source, mp)
+if not internal_backup_path_is_safe(backup_dir, source, mp):
+if not os.path.isdir(backup_dir) or os.path.islink(backup_dir):
+meta_path = os.path.join(backup_dir, INTERNAL_BACKUP_META)
+if disk.get("backup_mode") != "internal" or not disk.get("verified"):
+rootfs = os.path.join(backup_dir, "rootfs")
+kernel_file = os.path.join(backup_dir, "kernel.img")
+result["_backup_dir"] = backup_dir
+def discover_internal_backups(mountpoint=None):
+base = internal_backup_base(mp)
+meta = read_json_file(os.path.join(entry, INTERNAL_BACKUP_META))
+valid = validate_internal_backup_state(meta, mp)
+def rotation_layout_supported():
+"""True only for receiver layouts explicitly allowed to rotate backups in r33."""
+def rotation_layout_name():
+def load_state():
+with open(STATE_FILE, "r") as f:
+def save_state(data):
+with open(STATE_FILE, "w") as f:
+ROTATION_STATE_KEYS = (
+"rotation_enabled",
+"rotation_last_check",
+"rotation_last_success",
+"rotation_last_error",
+"rotation_next_due",
+"rotation_post_update_hold_until",
+_ROTATION_SERVICE = None
+def _state_without_runtime_keys(state):
+return dict((k, v) for k, v in state.items() if not str(k).startswith("_"))
+def rotation_time_text(epoch):
+def rotation_status_text(state):
+if not isinstance(state, dict) or not state.get("verified"):
+return "Status: Noch kein verifiziertes Backup."
+if not rotation_layout_supported():
+return "Status: Backup verifiziert · Auto-Rotation NICHT VERFÜGBAR"
+if not state.get("rotation_enabled", False):
+return "Status: Backup verifiziert · Auto-Rotation AUS (Taste 8)"
+return "Status: Backup verifiziert · Auto 24h EIN · nächste Prüfung %s" % rotation_time_text(state.get("rotation_next_due", 0))
+def _rotation_seed(state, enabled=True, fingerprint=None, now=None):
+result = dict(state or {})
+enabled = bool(enabled and rotation_layout_supported())
+result["rotation_enabled"] = enabled
+result["rotation_last_check"] = now
+result["rotation_last_success"] = now
+result["rotation_last_error"] = ""
+result["rotation_next_due"] = now + ROTATION_INTERVAL if enabled else 0
+result.pop("rotation_post_update_hold_until", None)
+def _merge_rotation_fields(base, source):
+for key in ROTATION_STATE_KEYS:
+def persist_rotation_state(state):
+"""Persist runtime state and mirror rotation fields into internal-backup metadata."""
+clean = _state_without_runtime_keys(state)
+ok = save_state(clean)
+if clean.get("backup_mode") != "internal" or not clean.get("verified"):
+merged = _merge_rotation_fields(disk, clean)
+def physically_verified_rotation_state(state=None):
+state = load_state() if state is None else state
+mode = state.get("backup_mode", "slot")
+checked = validate_internal_backup_state(state)
+return _merge_rotation_fields(checked, state)
+target = int(state.get("target_slot"))
+if not slot_backup_valid(target, dst, state.get("kernel_sha256", "")):
+return dict(state)
+def ensure_rotation_state(state):
+if state is None:
+result = dict(state)
+result.get("rotation_enabled") is not False or
+int(result.get("rotation_next_due") or 0) != 0 or
+result.get("rotation_last_error") != "Auto-Rotation sicher deaktiviert: Box-/Slot-Layout nicht freigegeben."
+result["rotation_enabled"] = False
+result["rotation_next_due"] = 0
+result["rotation_last_error"] = "Auto-Rotation sicher deaktiviert: Box-/Slot-Layout nicht freigegeben."
+persist_rotation_state(result)
+if "rotation_enabled" not in result:
+result = _rotation_seed(result, True)
+elif result.get("rotation_enabled") and not result.get("rotation_next_due"):
+result["rotation_next_due"] = int(time.time()) + ROTATION_INTERVAL
+def rotation_temp_path_safe(temp_path, canonical, suffix):
+def _remove_safe_rotation_tree(path, canonical, suffix):
+if not rotation_temp_path_safe(path, canonical, suffix):
+def post_update_rotation_delay():
+state = physically_verified_rotation_state()
+if state is None or not state.get("rotation_enabled", False):
+state["rotation_last_check"] = now
+state["rotation_last_error"] = ""
+state["rotation_post_update_hold_until"] = now + ROTATION_INTERVAL
+state["rotation_next_due"] = now + ROTATION_INTERVAL
+persist_rotation_state(state)
+class SafeUpdateRotationService(object):
+if rotation_layout_supported():
+self.timer.start(ROTATION_TICK_MS, False)
+line = "[AUTO-ROTATION] %s" % str(text)
+def _save_retry(self, state, reason):
+state = dict(state or {})
+state["rotation_last_error"] = str(reason)
+state["rotation_next_due"] = now + ROTATION_RETRY_INTERVAL
+self._emit("Rotation blockiert: Box-/Slot-Layout ist für r33 nicht freigegeben.")
+state = ensure_rotation_state(state)
+if not force and not state.get("rotation_enabled", False):
+due = int(state.get("rotation_next_due") or 0)
+self._save_retry(state, "System-Fingerprint konnte nicht erstellt werden.")
+previous_fp = state.get("system_fingerprint", "")
+state.pop("rotation_post_update_hold_until", None)
+self._emit("24h-Prüfung: System unverändert – kein neues Vollbackup.")
+state["system_fingerprint"] = fp
+self._emit("24h-Basiswert gesetzt; erste Rotation frühestens in 24h.")
+self._save_retry(state, "Multiboot-/KEXEC-Schutz nicht verifiziert.")
+self._emit("Rotation blockiert: Multiboot-/KEXEC-Schutz nicht verifiziert.")
+return self._start_internal_rotation(state, fp, ui)
+return self._start_slot_rotation(state, fp, ui)
+self._save_retry(state, "Unbekannter Backup-Modus.")
+ui.paint_update_state()
+ui.set_backup_progress(10, title, status)
+def _start_slot_rotation(self, state, fingerprint, ui):
+self._save_retry(state, "Slot-Zuordnung ungültig.")
+self._save_retry(state, "Slot-Zuordnung nicht sicher.")
+self._save_retry(state, "Backup-Slot/Dateisystem nicht sicher verfügbar.")
+self._save_retry(state, "Aktiver Quellslot nicht verifizierbar.")
+self._save_retry(state, "Bisheriges Sicherheitsbackup nicht mehr verifizierbar.")
+newdir = dst + ROTATION_NEW_SUFFIX
+olddir = dst + ROTATION_OLD_SUFFIX
+newkernel = dst + ROTATION_NEW_KERNEL_SUFFIX
+oldkernel = dst + ROTATION_OLD_KERNEL_SUFFIX
+temp_paths = ((newdir, ROTATION_NEW_SUFFIX), (olddir, ROTATION_OLD_SUFFIX))
+temp_paths += ((newkernel, ROTATION_NEW_KERNEL_SUFFIX), (oldkernel, ROTATION_OLD_KERNEL_SUFFIX))
+if not rotation_temp_path_safe(temp_path, dst, suffix) or os.path.lexists(temp_path):
+self._save_retry(state, "Temporärer Rotationsrest vorhanden: %s" % os.path.basename(temp_path))
+self._emit("Rotation blockiert: temporärer Rest vorhanden; nichts wird automatisch gelöscht.")
+self._save_retry(state, "GigaBlue Kernel-Slot nicht sicher verifizierbar.")
+self._save_retry(state, "Kernelgröße nicht bestimmbar.")
+self._save_retry(state, "Nicht genug freier Speicher für sichere Doppelkopie.")
+self._emit("Rotation verschoben: nicht genug Platz für neues Backup + bisheriges Backup.")
+expected_old_hash = state.get("kernel_sha256", "")
+echo 'Rotation fehlgeschlagen – stelle vorheriges Backup wieder her.'
+echo 'Erstelle neue Sicherung neben dem bisherigen Backup ...'
+echo 'Sichere bisherigen Backup-Kernel temporär ...'
+echo 'Aktiviere neuen Backup-Kernel ...'
+echo 'Neues Sicherheitsbackup final verifiziert.'
+echo 'ROTATION_VERIFIED'
+"state": dict(state),
+self._ui_start(ui, "Auto-Rotation – neues Backup", "Status: Altes Backup bleibt erhalten, bis das neue verifiziert ist ...")
+self._emit("Rotation startet: Slot %d → Sicherheits-Slot %d." % (source, target))
+def _start_internal_rotation(self, state, fingerprint, ui):
+self._save_retry(state, "Internes Backup nicht mehr verifizierbar.")
+self._save_retry(state, "Gesicherter Quellslot ist nicht aktiv.")
+self._save_retry(state, "Internes Multiboot-Dateisystem nicht schreibbar.")
+dst = internal_backup_dir(source, mp)
+if not src or not slot_root_tree_valid(src) or not internal_backup_path_is_safe(dst, source, mp):
+self._save_retry(state, "Quelle oder internes Backup-Ziel nicht sicher verifizierbar.")
+checked = validate_internal_backup_state(state, mp)
+for temp_path, suffix in ((newdir, ROTATION_NEW_SUFFIX), (olddir, ROTATION_OLD_SUFFIX)):
+self._save_retry(state, "Temporärer interner Rotationsrest vorhanden: %s" % os.path.basename(temp_path))
+self._emit("Interne Rotation blockiert: temporärer Rest vorhanden; bestehendes Backup bleibt erhalten.")
+self._save_retry(state, "Nicht genug freier Speicher für sichere interne Doppelkopie.")
+self._emit("Interne Rotation verschoben: nicht genug freier eMMC-Speicher.")
+enabled = bool(state.get("rotation_enabled", True))
+next_due = now + ROTATION_INTERVAL if enabled else 0
+'"backup_mode":"internal","source_slot":int(sys.argv[2]),"created":sys.argv[3],'
+'"backup_rel":sys.argv[7],"kernel_sha256":sys.argv[8],"kernel_size":int(sys.argv[9]),'
+'"image_version_sha256":sys.argv[10],"rotation_enabled":(sys.argv[11]=="1"),'
+'"system_fingerprint":sys.argv[12],"rotation_last_check":int(sys.argv[13]),'
+'"rotation_last_success":int(sys.argv[13]),"rotation_last_error":"",'
+'"rotation_next_due":int(sys.argv[14])}; '
+self._save_retry(state, "GigaBlue Kernelquelle nicht sicher verifizierbar.")
+echo 'Kopiere Kernel in neues internes Sicherheitsbackup ...'
+BACKUP_REL={backup_rel}
+echo 'Interne Rotation fehlgeschlagen – stelle vorheriges Backup wieder her.'
+echo 'Erstelle neues internes Backup neben dem bisherigen Backup ...'
+n3 -c "$META_PY" "$NEW/{meta_name}" "$SOURCE_SLOT" "$CREATED" "$CREATED_SORT" "$BUILD" "$ROOTDEV" "$BACKUP_REL" "$KERNEL_HASH" "$KERNEL_SIZE" "$IMAGE_HASH" "$ROT_ENABLED" "$FINGERPRINT" "$ROT_NOW" "$ROT_NEXT" "$KERNEL_SOURCE"
+echo 'Neues internes Sicherheitsbackup final verifiziert.'
+build=shq(build), rootdev=shq(rootdev), backup_rel=shq("%s/slot%d" % (INTERNAL_BACKUP_DIRNAME, source)),
+meta_name=INTERNAL_BACKUP_META, kernel_copy=kernel_copy,
+self._ui_start(ui, "Auto-Rotation – internes eMMC", "Status: Bisheriges Backup bleibt erhalten, bis die neue Kopie verifiziert ist ...")
+self._emit("Interne Rotation startet: Slot %d → /%s/slot%d." % (source, INTERNAL_BACKUP_DIRNAME, source))
+ui.set_backup_progress(15, "Auto-Rotation – Kopieren", "Status: Neues Backup wird erstellt ...")
+ui.set_backup_progress(80, "Auto-Rotation – Verifizieren", "Status: Neue Sicherung vor Austausch verifiziert ...")
+ui.set_backup_progress(96, "Auto-Rotation – Abschluss", "Status: Neues Backup final verifiziert ...")
+elif "rotation_verified" in low:
+ui.set_backup_progress(99, "Auto-Rotation – Abschluss", "Status: Abschlussprüfung ...")
+state = pending["state"]
+slot_backup_valid(target, dst)
+new_state = dict(state)
+new_state.update({
+"backup_mode": "slot",
+new_state = _rotation_seed(new_state, enabled, pending["fingerprint"], now)
+new_state["kernel_device"] = kernel_device_for_slot(target)
+new_state["kernel_sha256"] = sha256_prefix(new_state["kernel_device"])
+save_state(new_state)
+self._emit("Rotation erfolgreich. Vorheriges Backup erst NACH Verifikation entfernt.")
+ui.backup_verified = True
+ui.verified_backup_slot = target
+ui.verified_backup_mode = "slot"
+ui.set_backup_progress(100, "Auto-Rotation – Fertig", rotation_status_text(new_state))
+old_valid = slot_backup_valid(target, dst, state.get("kernel_sha256", ""))
+state["rotation_last_error"] = "Rotation RC=%s" % rc
+state["verified"] = False
+save_state(_state_without_runtime_keys(state))
+self._emit("Rotation FEHLGESCHLAGEN (RC=%s). Altes Backup gültig: %s" % (rc, "JA" if old_valid else "NEIN"))
+ui.backup_verified = bool(old_valid)
+ui.set_backup_progress(100, "Auto-Rotation – abgebrochen", "Status: Neues Backup verworfen · bisheriges Backup weiterhin verifiziert.")
+ui.set_backup_progress(0, "Auto-Rotation – FEHLER", "Status: Backup nicht mehr sicher verifizierbar · Update gesperrt.")
+disk = read_json_file(os.path.join(dst, INTERNAL_BACKUP_META))
+checked = validate_internal_backup_state(disk)
+cleanup_ok = _remove_safe_rotation_tree(olddir, dst, ROTATION_OLD_SUFFIX)
+persist_rotation_state(checked)
+self._emit("Interne Rotation erfolgreich. Vorheriges Backup erst NACH Verifikation entfernt%s." % ("" if cleanup_ok else "; alter Sicherungsrest konnte nicht entfernt werden"))
+ui.verified_backup_slot = None
+ui.verified_backup_mode = "internal"
+ui.verified_backup_path = dst
+ui.recovery_state = checked
+ui.set_backup_progress(100, "Auto-Rotation – Fertig", rotation_status_text(checked))
+# restore the old canonical backup before touching state.
+if os.path.isdir(olddir) and rotation_temp_path_safe(olddir, dst, ROTATION_OLD_SUFFIX):
+old_checked = validate_internal_backup_state(state)
+old_checked["rotation_last_check"] = now
+old_checked["rotation_last_error"] = "Interne Rotation RC=%s" % rc
+old_checked["rotation_next_due"] = now + ROTATION_RETRY_INTERVAL
+persist_rotation_state(old_checked)
+bad = dict(state)
+bad["rotation_last_error"] = "Interne Rotation/Restore fehlgeschlagen"
+save_state(_state_without_runtime_keys(bad))
+self._emit("Interne Rotation FEHLGESCHLAGEN (RC=%s). Vorheriges Backup gültig: %s" % (rc, "JA" if old_checked is not None else "NEIN"))
+ui.backup_verified = old_checked is not None
+ui.set_backup_progress(100, "Auto-Rotation – abgebrochen", "Status: Neues Backup verworfen · bisheriges internes Backup weiterhin verifiziert.")
+ui.set_backup_progress(0, "Auto-Rotation – FEHLER", "Status: Internes Backup nicht mehr sicher verifizierbar · Update gesperrt.")
+def get_rotation_service(session=None):
+global _ROTATION_SERVICE
+if _ROTATION_SERVICE is None:
+_ROTATION_SERVICE = SafeUpdateRotationService(session)
+elif session is not None and _ROTATION_SERVICE.session is None:
+_ROTATION_SERVICE.session = session
+return _ROTATION_SERVICE
+def rotation_sessionstart(reason, **kwargs):
+if session is not None and rotation_layout_supported():
+get_rotation_service(session)
+if _ROTATION_SERVICE is not None:
+_ROTATION_SERVICE.timer.stop()
+<!-- backup -->
+<!-- r16: clear separation between backup button and progress area -->
+<widget zPosition="25" name="backupProgress" position="125,672" size="590,28"
+<widget zPosition="25" name="backupStatus" position="125,704" size="590,20"
+This is now the ONE dynamic button, so enabled/disabled states can never overlap. -->
+self.onClose.append(self._rotation_screen_closed)
+self.backup_verified = False
+self.verified_backup_slot = None
+self.verified_backup_mode = None
+self.verified_backup_path = ""
+self.recovery_state = None
+self.pending_internal_backup = None
+self.pending_backup = None
+self.backup_total_bytes = 0
+self.backup_dst = ""
+fo", "currentOK", "kexecOK", "holdsOK", "hddOK", "targetSlot", "progressTitle", "progressPercent", "backupStatus", "updateButton", "updateHint", "holdLine", "log", "rollback", "navCursor"):
+self["backupProgress"] = ProgressBar()
+self["backupProgress"].setRange((0, 100))
+self["backupProgress"].setValue(0)
+self["progressTitle"].setText("Backup-Fortschritt")
+self["backupStatus"].setText("Status: Noch kein Backup für dieses Update.")
+self["rollback"].setText("Noch kein Backup vorhanden.")
+self.nav_focus = 5  # 0=currentInfo, 1=kexec, 2=holds, 3=hdd, 4=targetSlot, 5=backup, 6=update
+"yellow": self.start_backup,
+"0": self.request_delete_backup,
+"7": self.force_rotation_now,
+"8": self.toggle_rotation,
+"9": self.restore_internal_backup,
+self.progress_timer.callback.append(self.update_backup_progress)
+self.progress_timer.timeout.connect(self.update_backup_progress)
+def _rotation_screen_closed(self):
+self.paint_update_state()
+self.append_log("> Kein freier Multiboot-Slot – verwende internes eMMC-Sicherheitsbackup.")
+5: (43, 590),    # backup button
+self.start_backup()
+def set_backup_progress(self, value, title=None, status=None):
+self["backupProgress"].setValue(value)
+self["backupStatus"].setText(str(status))
+def update_backup_progress(self):
+if not self.busy or not self.backup_dst or self.backup_total_bytes <= 0:
+if not os.path.isdir(self.backup_dst):
+copied = tree_size_bytes(self.backup_dst)
+ratio = min(1.0, float(copied) / float(self.backup_total_bytes))
+self.set_backup_progress(value, "Backup-Fortschritt – Kopieren", "Status: Kopiere aktuelles Image ...")
+st = load_state()
+# r32: internal eMMC backup metadata is also stored on the shared
+if st.get("backup_mode") == "internal":
+internal = validate_internal_backup_state(st)
+candidates = discover_internal_backups()
+internal = ensure_rotation_state(_merge_rotation_fields(internal, st))
+self.recovery_state = internal
+self.verified_backup_mode = "internal"
+self.verified_backup_path = internal.get("_backup_dir", "")
+self.backup_verified = True
+self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(internal))
+self["rollback"].setText("Backup: Internes eMMC\nQuelle: Slot %s\nErstellt: %s\n0 = BACKUP LÖSCHEN" % (source, created))
+self.append_log("> Internes eMMC-Backup erneut geprüft: Slot %s OK." % source)
+# A backup of another slot is a recovery source, not permission
+self["rollback"].setText("eMMC-Backup: OK\nQuelle: Slot %s\nStatus: verifiziert\n9 = WIEDERHERSTELLEN" % source)
+self.append_log("> Notfall-Backup von Slot %s gefunden. Taste 9 = Wiederherstellen." % source)
+# Existing bootable-slot backup mode remains unchanged.
+if st.get("verified") and st.get("backup_mode", "slot") == "slot" and source == current_slot() and target is not None:
+valid = slot_backup_valid(target, dst, st.get("kernel_sha256", ""))
+st = ensure_rotation_state(st)
+self.verified_backup_slot = target
+self.verified_backup_mode = "slot"
+self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(st))
+self["rollback"].setText("Backup-Slot:  %s\nQuelle:       Slot %s\nErstellt:     %s\n0 = BACKUP LÖSCHEN" % (target, source, created))
+self.append_log("> Gespeichertes Backup erneut geprüft: Slot %s OK." % target)
+self.set_backup_progress(0, "Backup-Fortschritt", "Status: Gespeichertes Backup fehlt – Update gesperrt.")
+self["rollback"].setText("Noch kein gültiges Backup vorhanden.")
+self.append_log("> Alter Backup-Status verworfen: Backup physisch nicht mehr verifizierbar.")
+save_state(st)
+def paint_update_state(self):
+lock_text = "UPDATE GESPERRT – BACKUP LÄUFT"
+lock_hint = "Sicherheitsbackup wird erstellt und verifiziert."
+elif self.backup_verified:
+self["updateHint"].setText("Backup verifiziert – Update freigegeben")
+self["updateHint"].setText("Wird nach erfolgreichem Backup freigeschaltet.")
+def start_internal_backup(self):
+self.session.open(MessageBox, "Interner Backup-Pfad besteht die Sicherheitsprüfung nicht.", MessageBox.TYPE_ERROR)
+if os.path.lexists(backup_dir):
+existing = validate_internal_backup_state(read_json_file(os.path.join(backup_dir, INTERNAL_BACKUP_META)), mp)
+self.session.open(MessageBox, "Für Slot %d existiert bereits ein verifiziertes internes Backup.\n\nTaste 0 löscht ausschließlich dieses SafeUpdate-Backup." % source, MessageBox.TYPE_INFO)
+self.session.open(MessageBox, "Im internen SafeUpdate-Bereich liegt ein unvollständiges Backup.\nEs wird aus Sicherheitsgründen nicht überschrieben.", MessageBox.TYPE_ERROR)
+self.session.open(MessageBox, "Freier eMMC-Speicher bzw. Backup-Größe konnte nicht sicher ermittelt werden.", MessageBox.TYPE_ERROR)
+self.append_log("> Kein freier Slot – internes eMMC-Backup gewählt.")
+self.append_log("> Backup-Bereich: /%s/slot%d" % (INTERNAL_BACKUP_DIRNAME, source))
+lambda yes: self.do_internal_backup(yes, source, src, backup_dir, source_bytes),
+"Internes Sicherheitsbackup von Slot %d anlegen?\n\n"
+"Das Backup liegt separat unter /%s/." % (source, INTERNAL_BACKUP_DIRNAME),
+def do_internal_backup(self, yes, source, src, backup_dir, source_bytes):
+if not mp or not internal_backup_path_is_safe(backup_dir, source, mp):
+self.session.open(MessageBox, "Backup abgebrochen: interner Zielpfad ist nicht mehr eindeutig.", MessageBox.TYPE_ERROR)
+self.session.open(MessageBox, "Backup abgebrochen: interner Zielpfad existiert inzwischen.", MessageBox.TYPE_ERROR)
+if os.path.realpath(src) == os.path.realpath(backup_dir) or os.path.realpath(backup_dir).startswith(os.path.realpath(src).rstrip("/") + "/"):
+self.session.open(MessageBox, "Backup abgebrochen: Ziel liegt unerwartet im Quellimage.", MessageBox.TYPE_ERROR)
+self.backup_total_bytes = int(source_bytes or 0)
+self.backup_dst = rootfs
+self.pending_internal_backup = (source, backup_dir, src)
+self.set_backup_progress(3, "Backup-Fortschritt – Prüfen", "Status: Internes eMMC-Backup wird vorbereitet ...")
+echo 'Internes Backup-Ziel ist weiterhin frei.'
+echo "Backup zImage: $DST_HASH"
+echo 'BACKUP_VERIFIED'
+""".format(base=shq(base), dst=shq(backup_dir), src=shq(src), src_kernel=shq(src_kernel))
+""".format(base=shq(base), dst=shq(backup_dir), src=shq(src))
+self.append_log("> Internes eMMC-Sicherheitsbackup startet...")
+self.connect_container(self.backup_data, self.internal_backup_closed)
+def internal_backup_closed(self, rc):
+pending = self.pending_internal_backup
+source, backup_dir, src = pending
+"backup_mode": "internal",
+"backup_rel": "%s/slot%d" % (INTERNAL_BACKUP_DIRNAME, source),
+meta = _rotation_seed(meta, True)
+if save_json_file(os.path.join(backup_dir, INTERNAL_BACKUP_META), meta):
+checked = validate_internal_backup_state(meta)
+save_state(meta)
+self.verified_backup_path = backup_dir
+self.recovery_state = checked
+self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(meta))
+self["rollback"].setText("Backup: Internes eMMC\nQuelle: Slot %d\nStatus: verifiziert\n0 = BACKUP LÖSCHEN" % source)
+self.append_log("> Internes eMMC-Backup verifiziert. Update freigegeben.")
+self.set_backup_progress(self.progress_value, "Backup-Fortschritt – FEHLER", "Status: Internes Backup nicht vollständig verifiziert.")
+self.append_log("> FEHLER: Internes eMMC-Backup nicht verifiziert.")
+self.session.open(MessageBox, "Internes eMMC-Backup konnte nicht vollständig verifiziert werden.\nDas Update bleibt gesperrt.", MessageBox.TYPE_ERROR)
+def start_backup(self):
+self.session.open(MessageBox, "GigaBlue Kernel-/Slot-Struktur ist nicht eindeutig verifizierbar.\nBackup bleibt gesperrt.", MessageBox.TYPE_ERROR)
+# A verified backup stays visible after success. When the user explicitly
+# starts another backup, switch the field back to the selected free target.
+if self.backup_verified and self.slots:
+self.start_internal_backup()
+"STARTUP_%d ist nicht sicher für dieses Backup nutzbar.\\n"
+# the confirmed backup flow.
+"Freier Speicher bzw. Backup-Größe konnte nicht sicher ermittelt werden.\\n"
+"Backup bleibt gesperrt.",
+"Nicht genug freier Speicher für ein vollständiges Backup.\\n\\n"
+lambda yes: self.do_backup(yes, source, target, src, dst, source_bytes),
+"Backup von Slot %d nach Slot %d anlegen?\\n\\n"
+def do_backup(self, yes, source, target, src, dst, source_bytes):
+self.backup_dst = dst
+self.set_backup_progress(3, "Backup-Fortschritt – Prüfen", "Status: Backup wird vorbereitet ...")
+self.append_log("> Backup Slot %d -> Slot %d startet..." % (source, target))
+self.set_backup_progress(0, "Backup-Fortschritt – FEHLER", "Status: GigaBlue Kernel-Slot nicht sicher verifizierbar.")
+self.session.open(MessageBox, "GigaBlue Kernel-Slot ist nicht sicher verifizierbar.\nEs wurde kein Backup gestartet.", MessageBox.TYPE_ERROR)
+self.pending_backup = (source, target, dst)
+self.connect_container(self.backup_data, self.backup_closed)
+def backup_data(self, data):
+self.set_backup_progress(max(self.progress_value, 6), "Backup-Fortschritt – Prüfen", "Status: Zielslot geprüft ...")
+self.set_backup_progress(max(self.progress_value, 8), "Backup-Fortschritt – Vorbereiten", "Status: Dateisystem wird synchronisiert ...")
+self.set_backup_progress(max(self.progress_value, 10), "Backup-Fortschritt – Kopieren", "Status: Kopiere aktuelles Image ...")
+elif "quelle zimage" in low or "backup zimage" in low:
+self.set_backup_progress(max(self.progress_value, 95), "Backup-Fortschritt – Verifizieren", "Status: Prüfe Kernel und Integrität ...")
+elif "backup_verified" in low:
+self.set_backup_progress(99, "Backup-Fortschritt – Verifizieren", "Status: Abschlussprüfung ...")
+def backup_closed(self, rc):
+source, target, dst = self.pending_backup
+verified = rc == 0 and slot_backup_valid(target, dst)
+state = {"backup_mode": "slot", "source_slot": source, "target_slot": target, "created": created, "created_sort": datetime.now().strftime("%Y%m%d%H%M%S"), "
+state = _rotation_seed(state, True)
+state["kernel_device"] = kernel_device_for_slot(target)
+state["kernel_sha256"] = sha256_prefix(state["kernel_device"])
+save_state(state)
+self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(state))
+self["rollback"].setText("Backup-Slot:  %d\nQuelle:       Slot %d\nErstellt:     %s\n0 = BACKUP LÖSCHEN" % (target, source, created.split(" ")[0]))
+self.append_log("> Backup verifiziert. Update freigegeben.")
+self.set_backup_progress(self.progress_value, "Backup-Fortschritt – FEHLER", "Status: Backup FEHLGESCHLAGEN – Zielslot nicht verwenden.")
+self.append_log("> FEHLER: Backup nicht verifiziert.")
+self.session.open(MessageBox, "Backup konnte nicht verifiziert werden.\nDer Zielslot wurde NICHT automatisch gelöscht.", MessageBox.TYPE_ERROR)
+def request_delete_internal_backup(self):
+if isinstance(self.recovery_state, dict) and self.recovery_state.get("backup_mode") == "internal":
+candidate = self.recovery_state
+candidate = validate_internal_backup_state(st)
+found = discover_internal_backups()
+self.session.open(MessageBox, "Kein verifiziertes internes SafeUpdate-Backup zum Löschen vorhanden.", MessageBox.TYPE_INFO)
+checked = validate_internal_backup_state(candidate, mp) if mp else None
+self.session.open(MessageBox, "KILLSWITCH blockiert: Internes Backup ist nicht mehr eindeutig verifizierbar.", MessageBox.TYPE_ERROR)
+backup_dir = checked.get("_backup_dir", "")
+self.session.open(MessageBox, "KILLSWITCH blockiert: Backup-Pfad ist nicht sicher.", MessageBox.TYPE_ERROR)
+lambda yes: self.do_delete_internal_backup(yes, checked),
+"KILLSWITCH: Internes Backup von Slot %d wirklich löschen?\n\n"
+"Das OpenATV-Update wird anschließend wieder gesperrt." % (source, INTERNAL_BACKUP_DIRNAME, source),
+def do_delete_internal_backup(self, yes, state):
+checked = validate_internal_backup_state(state, mp) if mp else None
+self.session.open(MessageBox, "Löschen abgebrochen: Backup konnte nicht erneut verifiziert werden.", MessageBox.TYPE_ERROR)
+self.session.open(MessageBox, "Löschen abgebrochen: Backup-Pfad hat sich geändert.", MessageBox.TYPE_ERROR)
+self.pending_delete = ("internal", source, backup_dir)
+self.set_backup_progress(0, "Backup-Fortschritt – Löschen", "Status: Lösche internes Sicherheitsbackup ...")
+self.append_log("> KILLSWITCH: Lösche ausschließlich /%s/slot%d ..." % (INTERNAL_BACKUP_DIRNAME, source))
+echo 'BACKUP_DELETED'
+""".format(dst=shq(backup_dir), base=shq(base), meta=INTERNAL_BACKUP_META)
+self.connect_container(self.delete_backup_data, self.internal_delete_closed)
+_, source, backup_dir = pending
+deleted = (rc == 0 and not os.path.lexists(backup_dir))
+if os.path.exists(STATE_FILE):
+os.unlink(STATE_FILE)
+save_state({"backup_mode": "internal", "source_slot": source, "verified": False, "deleted": datetime.now().strftime("%d.%m.%Y %H:%M")})
+self.set_backup_progress(0, "Backup-Fortschritt", "Status: Internes Backup gelöscht – Update gesperrt.")
+self.append_log("> KILLSWITCH: Internes eMMC-Backup sauber gelöscht. Alle Slots blieben unangetastet.")
+self.session.open(MessageBox, "Internes Sicherheitsbackup wurde sauber gelöscht.\n\nKein Multiboot-Slot und keine Kernelpartition wurden verändert.\nDas Update ist wieder gesperrt.", MessageBox.TYP
+self.append_log("> KILLSWITCH FEHLER: Internes Backup wurde nicht vollständig gelöscht.")
+self.set_backup_progress(0, "Backup-Fortschritt – FEHLER", "Status: Löschen unvollständig – Update gesperrt.")
+self.session.open(MessageBox, "Internes Backup konnte nicht vollständig gelöscht werden.\nDas Update bleibt gesperrt.", MessageBox.TYPE_ERROR)
+def request_delete_backup(self):
+"""Safely remove only the verified SafeUpdate backup tree; keep STARTUP_N intact."""
+if self.verified_backup_mode == "internal" or (isinstance(self.recovery_state, dict) and self.recovery_state.get("backup_mode") == "internal"):
+self.request_delete_internal_backup()
+if not self.backup_verified or self.verified_backup_slot is None:
+"Kein verifiziertes SafeUpdate-Backup zum Löschen vorhanden.",
+target = int(self.verified_backup_slot)
+# Fail closed: only the exact backup recorded and physically revalidated by SafeUpdate may be deleted.
+self.append_log("> KILLSWITCH blockiert: Backup-Zuordnung nicht eindeutig.")
+"Löschen blockiert. Das gespeicherte Backup ist nicht eindeutig dem laufenden Slot zugeordnet.",
+lambda yes: self.do_delete_backup(yes, target, dst),
+"KILLSWITCH: Backup in Slot %d wirklich löschen?\n\n"
+def do_delete_backup(self, yes, target, dst):
+self.set_backup_progress(0, "Backup-Fortschritt – Löschen", "Status: Lösche Sicherheitsbackup aus Slot %d ..." % target)
+self.append_log("> KILLSWITCH: Lösche verifiziertes Backup aus Slot %d ..." % target)
+self.connect_container(self.delete_backup_data, self.delete_backup_closed)
+def delete_backup_data(self, data):
+def delete_backup_closed(self, rc):
+# If state cleanup fails, overwrite it fail-closed so a stale verified state can never unlock updates.
+save_state({
+self.set_backup_progress(0, "Backup-Fortschritt", "Status: Backup aus Slot %d gelöscht – Update gesperrt." % target)
+"Backup in Slot %d wurde sauber gelöscht.\n\nSTARTUP_%d blieb erhalten. Der Slot ist wieder frei und das Update ist gesperrt." % (target, target),
+self.set_backup_progress(0, "Backup-Fortschritt – FEHLER", "Status: Löschen unvollständig – Slot %d NICHT verwenden." % target)
+self["rollback"].setText("Backup-Löschung unvollständig.\nSlot %d NICHT verwenden." % target)
+"Backup konnte nicht vollständig gelöscht werden.\n\nSlot %d wird NICHT als frei behandelt. Bitte Details prüfen." % target,
+def restore_internal_backup(self):
+state = self.recovery_state
+if not isinstance(state, dict) or state.get("backup_mode") != "internal":
+state = found[0] if found else None
+self.session.open(MessageBox, "Kein verifiziertes internes Notfall-Backup vorhanden.", MessageBox.TYPE_INFO)
+self.session.open(MessageBox, "Wiederherstellung blockiert: Backup ist nicht mehr vollständig verifizierbar.", MessageBox.TYPE_ERROR)
+lambda yes: self.do_restore_internal_backup(yes, checked),
+"NOTFALL-RÜCKKEHR: Slot %d aus dem internen SafeUpdate-Backup wiederherstellen?\n\n"
+def do_restore_internal_backup(self, yes, state):
+self.session.open(MessageBox, "Wiederherstellung abgebrochen: Backup-Prüfung ist nicht mehr gültig.", MessageBox.TYPE_ERROR)
+backup_root = checked.get("_rootfs", "")
+if not active or os.path.realpath(target) == os.path.realpath(active) or not slot_root_tree_valid(backup_root):
+self.set_backup_progress(5, "Wiederherstellung – Prüfen", "Status: Verifiziertes Backup wird zurückgespielt ...")
+kernel_file = os.path.join(checked.get("_backup_dir", ""), "kernel.img")
+BACKUP={backup}
+test -d "$BACKUP"
+test -f "$BACKUP/etc/image-version"
+test -e "$BACKUP/sbin/init"
+test -f "$BACKUP/usr/bin/enigma2"
+cp -a "$BACKUP"/. "$TARGET"/
+""".format(backup=shq(backup_root), target=shq(target), kernel_file=shq(kernel_file), dst_kernel=shq(dst_kernel))
+test -f "$BACKUP/zImage"
+SRC_HASH=$(sha256sum "$BACKUP/zImage" | awk '{{print $1}}')
+""".format(backup=shq(backup_root), target=shq(target))
+self.set_backup_progress(30, "Wiederherstellung – Kopieren", "Status: Slot wird aus Sicherheitsbackup wiederhergestellt ...")
+self.set_backup_progress(90, "Wiederherstellung – Kernel", "Status: Kernel wird verifiziert zurückgespielt ...")
+self.set_backup_progress(99, "Wiederherstellung – Verifizieren", "Status: Abschlussprüfung ...")
+source, target, state = pending
+kernel_hash = state.get("kernel_sha256", "")
+ok = sha256_prefix(os.path.join(target, "zImage")) == state.get("kernel_sha256", "")
+self.set_backup_progress(100, "Wiederherstellung – Fertig", "Status: Slot %d erfolgreich wiederhergestellt." % source)
+self.session.open(MessageBox, "Slot %d wurde erfolgreich aus dem internen Sicherheitsbackup wiederhergestellt.\n\nDu kannst jetzt in Slot %d booten. Das Sicherheitsbackup bleibt erhalten." % (source, source), MessageBox.TYPE_INFO)
+self.set_backup_progress(0, "Wiederherstellung – FEHLER", "Status: Wiederherstellung nicht vollständig verifiziert.")
+MessageBox, "Wiederherstellung konnte nicht vollständig verifiziert werden.\nDas interne Sicherheitsbackup wurde NICHT gelöscht und kann erneut verwendet werden.", MessageBox.TYPE_ERROR)
+def toggle_rotation(self):
+"Auto-Rotation ist auf dieser Box sicher deaktiviert.\n\nDas Box-/Slot-Layout ist für r33 noch nicht freigegeben. Normales Backup, Update, Killswitch und
+self.session.open(MessageBox, "Auto-Rotation kann erst mit einem verifizierten Backup verwendet werden.", MessageBox.TYPE_INFO)
+enabled = not bool(state.get("rotation_enabled", False))
+state["rotation_enabled"] = enabled
+state["rotation_next_due"] = now + ROTATION_INTERVAL if enabled else 0
+if not state.get("system_fingerprint"):
+state["system_fingerprint"] = current_system_fingerprint()
+self["backupStatus"].setText(rotation_status_text(state))
+self.append_log("> Auto-Rotation 24h: %s" % ("EIN" if enabled else "AUS"))
+"Automatische Backup-Rotation ist jetzt %s.\n\nPrüfintervall: 24 Stunden.\nEin Vollbackup wird nur erstellt, wenn sich der Systemstand geändert hat." % ("EIN" if enabled else "AUS"),
+def force_rotation_now(self):
+"Rotation ist auf dieser Box blockiert.\n\nDas Box-/Slot-Layout ist für r33 noch nicht freigegeben; es wird nichts verändert.",
+self.session.open(MessageBox, "Für den Rotationstest wird zuerst ein verifiziertes SafeUpdate-Backup benötigt.", MessageBox.TYPE_INFO)
+self._force_rotation_confirmed,
+"Backup-Rotation JETZT starten?\n\nDas bisherige verifizierte Backup bleibt bestehen, bis die neue Kopie vollständig geprüft ist.\nErst danach wird das alte Backup ersetzt.",
+def _force_rotation_confirmed(self, yes):
+get_rotation_service(self.session).check(True, self)
+if not self.backup_verified:
+self.session.open(MessageBox, "Update bleibt gesperrt, bis ein Backup erfolgreich verifiziert wurde.", MessageBox.TYPE_INFO)
+self.session.openWithCallback(self.do_update, MessageBox, "Backup ist verifiziert.\n\nOpenATV jetzt mit opkg update && opkg upgrade aktualisieren?", MessageBox.TYPE_YESNO)
+post_update_rotation_delay()
+self.append_log("> Auto-Rotation: Vor-Update-Backup bleibt mindestens 24h erhalten.")
+verified_state = physically_verified_rotation_state(st)
+if verified_state is not None:
+st = ensure_rotation_state(verified_state)
+mode = st.get("backup_mode") or ("internal" if not self.slots else "slot")
+auto_text = "EIN / 24h" if st.get("rotation_enabled", False) else "AUS"
+next_text = rotation_time_text(st.get("rotation_next_due", 0)) if st.get("rotation_enabled", False) else "-"
+"Backup-Modus: %s\n"
+"Letztes Backup: %s\n"
+"Auto-Rotation: %s\n"
+"7 = Rotation jetzt testen\n"
+"8 = Auto-Rotation EIN/AUS"
+PluginDescriptor(name=PLUGIN_NAME, description="Backup + sicheres OpenATV Update für KEXEC-Multiboot", where=PluginDescriptor.WHERE_PLUGINMENU, fnc=main),
+PluginDescriptor(name=PLUGIN_NAME, description="Backup + sicheres OpenATV Update für KEXEC-Multiboot", where=PluginDescriptor.WHERE_EXTENSIONSMENU, fnc=main),
+PluginDescriptor(where=PluginDescriptor.WHERE_SESSIONSTART, fnc=rotation_sessionstart),
+FULL_MOUNT = "/tmp/safeupdate2026-full"
+LOG_FILE = "/tmp/safeupdate2026.log"
+for line in read_text("/etc/image-version").splitlines():
+if len(parts) >= 2 and parts[1] == "/media/usb":
+# Other receivers (GigaBlue/Octagon/etc.) keep the vendor-neutral r25 artwork.
+image = read_text("/etc/image-version")
+test -f "$SRC/etc/image-version"
+test -f "$DST/etc/image-version"
+test -f "$NEW/etc/image-version"
+test -f "$ROOTFS/etc/image-version"
+IMAGE_HASH=$(sha256sum "$ROOTFS/etc/image-version" | awk '{{print $1}}')
+test -f "$DST/rootfs/etc/image-version"
+DST_IMAGE_HASH=$(sha256sum "$DST/rootfs/etc/image-version" | awk '{{print $1}}')
+self.append_log("> HDD /media/usb: %s" % ("OK" if hdd_ok() else "FEHLER"))
+3: (43, 356),    # HDD /media/usb
+test -f "$TARGET/etc/image-version"
+"HDD /media/usb: %s\n"
+
+FUNCTIONS OF INTEREST
+
+### expected_kernel_device
+def expected_kernel_device(slot):
+    if not is_gbtrio4k():
+        return ""
+    try:
+        return os.path.realpath(GBTRIO4K_KERNEL_DEVICES[int(slot)])
+    except Exception:
+        return ""
+
+### current_slot
+def current_slot():
+    sub = cmd_value("rootsubdir")
+    m = re.search(r"(?:^|/)linuxrootfs(\d+)$", sub)
+    if m:
+        return int(m.group(1))
+
+    kern = cmd_value("kernel")
+    m = re.search(r"(?:^|/)linuxrootfs(\d+)/zImage$", kern)
+    return int(m.group(1)) if m else None
+
+### parse_startup_text
+def parse_startup_text(slot, text, path=""):
+    root = ""
+    rootsubdir = ""
+    kernel = ""
+
+    m = re.search(r"(?:^|[\s\'\"])root=([^\s\'\"]+)", text or "")
+    if m:
+        root = m.group(1)
+    m = re.search(r"(?:^|[\s\'\"])rootsubdir=([^\s\'\"]+)", text or "")
+    if m:
+        rootsubdir = m.group(1)
+    m = re.search(r"(?:^|[\s\'\"])kernel=([^\s\'\"]+)", text or "")
+    if m:
+        kernel = m.group(1)
+
+    rootsubdir = safe_rootsubdir(rootsubdir, slot)
+    if not root or not rootsubdir or not kernel:
+        return None
+
+    kernel_norm = os.path.normpath(kernel.strip().lstrip("/"))
+    expected_tree_kernel = os.path.join(rootsubdir, "zImage")
+    kernel_in_tree = kernel_norm == expected_tree_kernel
+    kernel_device = os.path.realpath(kernel) if kernel.startswith("/dev/") else ""
+    if not kernel_in_tree and not kernel_device:
+        return None
+
+    dev = resolve_root_spec(root)
+    if not dev:
+        return None
+
+    return {
+        "slot": int(slot),
+        "path": path,
+        "root_spec": root,
+        "root_device": dev,
+        "rootsubdir": rootsubdir,
+        "kernel": kernel,
+        "kernel_device": kernel_device,
+        "kernel_in_tree": kernel_in_tree,
+    }
+
+### startup_slots
+def startup_slots():
+    result = {}
+    for path in sorted(glob.glob("/boot/STARTUP_*")):
+        base = os.path.basename(path)
+        m = re.match(r"^STARTUP_(\d+)$", base)
+        if not m:
+            continue
+        slot = int(m.group(1))
+        info = parse_startup_text(slot, read_text(path), path)
+        if info is not None:
+            result[slot] = info
+    return result
+
+### slot_root_tree_valid
+def slot_root_tree_valid(path):
+    common = (
+        os.path.isdir(path) and
+        os.path.isfile(os.path.join(path, "etc", "image-version")) and
+        os.path.exists(os.path.join(path, "sbin", "init")) and
+        os.path.isfile(os.path.join(path, "usr", "bin", "enigma2"))
+    )
+    if not common:
+        return False
+    if is_gbtrio4k():
+        return True
+    return os.path.isfile(os.path.join(path, "zImage"))
+
+### compatible_startup_slots
+def compatible_startup_slots():
+    dev = root_device()
+    result = {}
+    if not dev:
+        return result
+    for slot, info in startup_slots().items():
+        if same_device(info.get("root_device"), dev):
+            result[slot] = info
+    return result
+
+### slot_path
+def slot_path(slot, mountpoint=None):
+    info = compatible_startup_slots().get(int(slot))
+    if not info:
+        return ""
+    mp = mountpoint or ensure_full_mount(False)
+    if not mp:
+        return ""
+    return os.path.join(mp, info["rootsubdir"])
+
+### slot_is_verified_free
+def slot_is_verified_free(info, mountpoint):
+    if not info or not mountpoint:
+        return False
+    path = os.path.join(mountpoint, info["rootsubdir"])
+    # OpenATV Delete can leave an empty linuxrootfsN directory behind.
+    # Only a completely empty real directory is reusable; partial images stay blocked.
+    return (not os.path.lexists(path)) or is_strictly_empty_dir(path)
+
+### free_slots
+def free_slots():
+    """
+    A slot is offered only when:
+    - a numeric /boot/STARTUP_N exists and passes strict validation,
+    - it belongs to the same multiboot root device as the running slot,
+    - the running slot is verifiably visible in a full-filesystem view,
+    - the target linuxrootfsN path does not exist, or is a strictly empty OpenATV delete-remnant.
+    """
+    active = current_slot()
+    mp = ensure_full_mount(False)
+    if active is None or not mp:
+        return []
+
+    src = active_source_path(mp)
+    if not src or not os.path.isdir(src):
+        return []
+
+    result = []
+    for slot, info in sorted(compatible_startup_slots().items()):
+        if slot == active:
+            continue
+        if slot_is_verified_free(info, mp):
+            result.append(slot)
+    return result
+
+### kernel_device_for_slot
+def kernel_device_for_slot(slot):
+    try:
+        info = startup_slots().get(int(slot))
+    except Exception:
+        info = None
+    if not info:
+        return ""
+    return os.path.realpath(info.get("kernel_device") or "")
+
+### slot_backup_valid
+def slot_backup_valid(slot, path, expected_kernel_hash=""):
+    if not slot_root_tree_valid(path):
+        return False
+    if not is_gbtrio4k():
+        return True
+    kernel_dev = kernel_device_for_slot(slot)
+    if not kernel_dev or not os.path.exists(kernel_dev):
+        return False
+    target_hash = sha256_prefix(kernel_dev)
+    if not target_hash:
+        return False
+    if expected_kernel_hash:
+        return target_hash == expected_kernel_hash
+    source_dev = active_kernel_device()
+    source_hash = sha256_prefix(source_dev) if source_dev else ""
+    return bool(source_hash and target_hash == source_hash)
+
+### internal_backup_base
+def internal_backup_base(mountpoint):
+    if not mountpoint:
+        return ""
+    return os.path.join(mountpoint, INTERNAL_BACKUP_DIRNAME)
+
+### internal_backup_dir
+def internal_backup_dir(source_slot, mountpoint):
+    try:
+        source_slot = int(source_slot)
+    except Exception:
+        return ""
+    if source_slot <= 0 or source_slot > 99 or not mountpoint:
+        return ""
+    return os.path.join(internal_backup_base(mountpoint), "slot%d" % source_slot)
+
+### internal_backup_path_is_safe
+def internal_backup_path_is_safe(path, source_slot, mountpoint):
+    expected = internal_backup_dir(source_slot, mountpoint)
+    if not expected or not path or not mountpoint:
+        return False
+    mp_real = os.path.realpath(mountpoint)
+    base = internal_backup_base(mountpoint)
+    expected_real = os.path.realpath(expected)
+    path_real = os.path.realpath(path)
+    if path_real != expected_real:
+        return False
+    if not expected_real.startswith(mp_real.rstrip("/") + "/"):
+        return False
+    if os.path.basename(expected_real) != "slot%d" % int(source_slot):
+        return False
+    if os.path.lexists(base) and (not os.path.isdir(base) or os.path.islink(base)):
+        return False
+    if os.path.lexists(expected) and os.path.islink(expected):
+        return False
+    return True
+
+### validate_internal_backup_state
+def validate_internal_backup_state(state, mountpoint=None):
+    if not isinstance(state, dict):
+        return None
+    if state.get("backup_mode") != "internal" or not state.get("verified"):
+        return None
+    try:
+        source = int(state.get("source_slot"))
+    except Exception:
+        return None
+
+    mp = mountpoint or ensure_full_mount(False)
+    if not mp:
+        return None
+    info = compatible_startup_slots().get(source)
+    if not info:
+        return None
+
+    backup_dir = internal_backup_dir(source, mp)
+    if not internal_backup_path_is_safe(backup_dir, source, mp):
+        return None
+    if not os.path.isdir(backup_dir) or os.path.islink(backup_dir):
+        return None
+
+    meta_path = os.path.join(backup_dir, INTERNAL_BACKUP_META)
+    disk = read_json_file(meta_path)
+    if disk.get("backup_mode") != "internal" or not disk.get("verified"):
+        return None
+    try:
+        if int(disk.get("source_slot")) != source:
+            return None
+    except Exception:
+        return None
+
+    recorded_root = os.path.realpath(disk.get("root_device") or "")
+    live_root = os.path.realpath(root_device() or "")
+    if not recorded_root or recorded_root != live_root:
+        return None
+
+    rootfs = os.path.join(backup_dir, "rootfs")
+    if os.path.islink(rootfs) or not slot_root_tree_valid(rootfs):
+        return None
+
+    image_hash = disk.get("image_version_sha256", "")
+    if not image_hash or sha256_prefix(os.path.join(rootfs, "etc", "image-version")) != image_hash:
+        return None
+
+    kernel_hash = disk.get("kernel_sha256", "")
+    if not kernel_hash:
+        return None
+    if is_gbtrio4k():
+        kernel_file = os.path.join(backup_dir, "kernel.img")
+        if os.path.islink(kernel_file) or not os.path.isfile(kernel_file):
+            return None
+        if sha256_prefix(kernel_file) != kernel_hash:
+            return None
+        try:
+            expected_size = int(disk.get("kernel_size", 0))
+        except Exception:
+            expected_size = 0
+        if expected_size > 0:
+            try:
+                if os.path.getsize(kernel_file) != expected_size:
+                    return None
+            except Exception:
+                return None
+    else:
+        zimage = os.path.join(rootfs, "zImage")
+        if not os.path.isfile(zimage) or sha256_prefix(zimage) != kernel_hash:
+            return None
+
+    result = dict(disk)
+    result["_backup_dir"] = backup_dir
+    result["_rootfs"] = rootfs
+    return result
+
+### discover_internal_backups
+def discover_internal_backups(mountpoint=None):
+    mp = mountpoint or ensure_full_mount(False)
+    if not mp:
+        return []
+    base = internal_backup_base(mp)
+    if not os.path.isdir(base) or os.path.islink(base):
+        return []
+    result = []
+    for entry in sorted(glob.glob(os.path.join(base, "slot*"))):
+        if os.path.islink(entry) or not os.path.isdir(entry):
+            continue
+        meta = read_json_file(os.path.join(entry, INTERNAL_BACKUP_META))
+        valid = validate_internal_backup_state(meta, mp)
+        if valid:
+            result.append(valid)
+    result.sort(key=lambda x: str(x.get("created_sort", "")), reverse=True)
+    return result
+
+### load_state
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+### save_state
+def save_state(data):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        return True
+    except Exception:
+        return False
+
+### _state_without_runtime_keys
+def _state_without_runtime_keys(state):
+    if not isinstance(state, dict):
+        return {}
+    return dict((k, v) for k, v in state.items() if not str(k).startswith("_"))
+
+### persist_rotation_state
+def persist_rotation_state(state):
+    """Persist runtime state and mirror rotation fields into internal-backup metadata."""
+    clean = _state_without_runtime_keys(state)
+    ok = save_state(clean)
+    if clean.get("backup_mode") != "internal" or not clean.get("verified"):
+        return ok
+    try:
+        source = int(clean.get("source_slot"))
+    except Exception:
+        return ok
+    mp = ensure_full_mount(False)
+    if not mp:
+        return ok
+    backup_dir = internal_backup_dir(source, mp)
+    if not internal_backup_path_is_safe(backup_dir, source, mp):
+        return ok
+    meta_path = os.path.join(backup_dir, INTERNAL_BACKUP_META)
+    disk = read_json_file(meta_path)
+    if disk.get("backup_mode") != "internal" or not disk.get("verified"):
+        return ok
+    try:
+        if int(disk.get("source_slot")) != source:
+            return ok
+    except Exception:
+        return ok
+    merged = _merge_rotation_fields(disk, clean)
+    save_json_file(meta_path, merged)
+    return ok
+
+### physically_verified_rotation_state
+def physically_verified_rotation_state(state=None):
+    state = load_state() if state is None else state
+    if not isinstance(state, dict) or not state.get("verified"):
+        return None
+    try:
+        source = int(state.get("source_slot"))
+    except Exception:
+        return None
+    if source != current_slot():
+        return None
+    mode = state.get("backup_mode", "slot")
+    if mode == "internal":
+        checked = validate_internal_backup_state(state)
+        if checked is None:
+            return None
+        return _merge_rotation_fields(checked, state)
+    if mode != "slot":
+        return None
+    try:
+        target = int(state.get("target_slot"))
+    except Exception:
+        return None
+    if target == source:
+        return None
+    info = compatible_startup_slots().get(target)
+    mp = ensure_full_mount(False)
+    if not info or not mp:
+        return None
+    dst = os.path.join(mp, info["rootsubdir"])
+    if not slot_backup_valid(target, dst, state.get("kernel_sha256", "")):
+        return None
+    return dict(state)
+
+### ensure_rotation_state
+def ensure_rotation_state(state):
+    if state is None:
+        return None
+    result = dict(state)
+    if not rotation_layout_supported():
+        changed = (
+            result.get("rotation_enabled") is not False or
+            int(result.get("rotation_next_due") or 0) != 0 or
+            result.get("rotation_last_error") != "Auto-Rotation sicher deaktiviert: Box-/Slot-Layout nicht freigegeben."
+        )
+        result["rotation_enabled"] = False
+        result["rotation_next_due"] = 0
+        result["rotation_last_error"] = "Auto-Rotation sicher deaktiviert: Box-/Slot-Layout nicht freigegeben."
+        result.pop("rotation_post_update_hold_until", None)
+        if changed:
+            persist_rotation_state(result)
+        return result
+    if "rotation_enabled" not in result:
+        result = _rotation_seed(result, True)
+        persist_rotation_state(result)
+    elif result.get("rotation_enabled") and not result.get("rotation_next_due"):
+        result["rotation_next_due"] = int(time.time()) + ROTATION_INTERVAL
+        if not result.get("system_fingerprint"):
+            result["system_fingerprint"] = current_system_fingerprint()
+        persist_rotation_state(result)
+    return result
+
+### _start_slot_rotation
+def _start_slot_rotation(self, state, fingerprint, ui):
+        try:
+            source = int(state.get("source_slot"))
+            target = int(state.get("target_slot"))
+        except Exception:
+            self._save_retry(state, "Slot-Zuordnung ungültig.")
+            return False
+        if source != current_slot() or target == source:
+            self._save_retry(state, "Slot-Zuordnung nicht sicher.")
+            return False
+
+        info = compatible_startup_slots().get(target)
+        mp = ensure_full_mount(True)
+        if not info or not mp:
+            self._save_retry(state, "Backup-Slot/Dateisystem nicht sicher verfügbar.")
+            return False
+        src = active_source_path(mp)
+        dst = os.path.join(mp, info["rootsubdir"])
+        if not src or not slot_root_tree_valid(src):
+            self._save_retry(state, "Aktiver Quellslot nicht verifizierbar.")
+            return False
+        if not slot_backup_valid(target, dst, state.get("kernel_sha256", "")):
+            self._save_retry(state, "Bisheriges Sicherheitsbackup nicht mehr verifizierbar.")
+            return False
+
+        newdir = dst + ROTATION_NEW_SUFFIX
+        olddir = dst + ROTATION_OLD_SUFFIX
+        newkernel = dst + ROTATION_NEW_KERNEL_SUFFIX
+        oldkernel = dst + ROTATION_OLD_KERNEL_SUFFIX
+        temp_paths = ((newdir, ROTATION_NEW_SUFFIX), (olddir, ROTATION_OLD_SUFFIX))
+        if is_gbtrio4k():
+            temp_paths += ((newkernel, ROTATION_NEW_KERNEL_SUFFIX), (oldkernel, ROTATION_OLD_KERNEL_SUFFIX))
+        for temp_path, suffix in temp_paths:
+            if not rotation_temp_path_safe(temp_path, dst, suffix) or os.path.lexists(temp_path):
+                self._save_retry(state, "Temporärer Rotationsrest vorhanden: %s" % os.path.basename(temp_path))
+                self._emit("Rotation blockiert: temporärer Rest vorhanden; nichts wird automatisch gelöscht.")
+                return False
+
+        source_bytes = tree_size_bytes(src)
+        free_bytes = filesystem_free_bytes(mp)
+        reserve = 128 * 1024 * 1024
+        extra = 0
+        src_kernel = ""
+        dst_kernel = ""
+        if is_gbtrio4k():
+            src_kernel = active_kernel_device()
+            dst_kernel = kernel_device_for_slot(target)
+            if (not gigablue_kernel_layout_ok() or not src_kernel or not dst_kernel or
+                    src_kernel == dst_kernel or dst_kernel != expected_kernel_device(target)):
+                self._save_retry(state, "GigaBlue Kernel-Slot nicht sicher verifizierbar.")
+                return False
+            kernel_bytes = block_device_size(src_kernel)
+            if kernel_bytes <= 0:
+                self._save_retry(state, "Kernelgröße nicht bestimmbar.")
+                return False
+            extra = kernel_bytes * 2
+        if source_bytes <= 0 or free_bytes < source_bytes + extra + reserve:
+            self._save_retry(state, "Nicht genug freier Speicher für sichere Doppelkopie.")
+            self._emit("Rotation verschoben: nicht genug Platz für neues Backup + bisheriges Backup.")
+            return False
+
+        if is_gbtrio4k():
+            expected_old_hash = state.get("kernel_sha256", "")
+            script = r'''
+set -e
+SRC={src}
+DST={dst}
+NEW={newdir}
+OLD={olddir}
+SRC_KERNEL={src_kernel}
+DST_KERNEL={dst_kernel}
+NEW_KERNEL={newkernel}
+OLD_KERNEL={oldkernel}
+EXPECTED_OLD_HASH={expected_old_hash}
+
+restore_previous() {{
+    rc="$1"
+    if [ "$rc" -ne 0 ]; then
+        echo 'Rotation fehlgeschlagen – stelle vorheriges Backup wieder her.'
+        if [ -d "$OLD" ]; then
+            if [ -e "$DST" ]; then rm -rf "$DST"; fi
+            mv "$OLD" "$DST" 2>/dev/null || true
+        fi
+        if [ -f "$OLD_KERNEL" ]; then
+            dd if="$OLD_KERNEL" of="$DST_KERNEL" bs=1048576 conv=fsync 2>/dev/null || true
+        fi
+        if [ -e "$NEW" ]; then rm -rf "$NEW"; fi
+        rm -f "$NEW_KERNEL"
+        sync
+    fi
+    exit "$rc"
+}}
+trap 'rc=$?; restore_previous "$rc"' EXIT
+
+test -d "$SRC"
+test -f "$SRC/etc/image-version"
+test -e "$SRC/sbin/init"
+test -f "$SRC/usr/bin/enigma2"
+test -d "$DST"
+test -f "$DST/etc/image-version"
+test -b "$SRC_KERNEL"
+test -b "$DST_KERNEL"
+test ! -e "$NEW"
+test ! -e "$OLD"
+test ! -e "$NEW_KERNEL"
+test ! -e "$OLD_KERNEL"
+
+echo 'Erstelle neue Sicherung neben dem bisherigen Backup ...'
+mkdir "$NEW"
+cp -a "$SRC"/. "$NEW"/
+sync
+test -f "$NEW/etc/image-version"
+test -e "$NEW/sbin/init"
+test -f "$NEW/usr/bin/enigma2"
+
+echo 'Sichere bisherigen Backup-Kernel temporär ...'
+dd if="$DST_KERNEL" of="$OLD_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+OLD_HASH=$(sha256sum "$OLD_KERNEL" | awk '{{print $1}}')
+DST_OLD_HASH=$(sha256sum "$DST_KERNEL" | awk '{{print $1}}')
+[ -n "$OLD_HASH" ]
+[ "$OLD_HASH" = "$DST_OLD_HASH" ] || exit 41
+if [ -n "$EXPECTED_OLD_HASH" ]; then [ "$OLD_HASH" = "$EXPECTED_OLD_HASH" ] || exit 42; fi
+
+echo 'Kopiere neuen Kernel zunächst in Sicherheitsdatei ...'
+dd if="$SRC_KERNEL" of="$NEW_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+SRC_HASH=$(sha256sum "$SRC_KERNEL" | awk '{{print $1}}')
+NEW_HASH=$(sha256sum "$NEW_KERNEL" | awk '{{print $1}}')
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$NEW_HASH" ] || exit 43
+
+echo 'Neue Sicherung vollständig kopiert und Kernel verifiziert.'
+mv "$DST" "$OLD"
+mv "$NEW" "$DST"
+sync
+
+echo 'Aktiviere neuen Backup-Kernel ...'
+dd if="$NEW_KERNEL" of="$DST_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+sync
+DST_HASH=$(sha256sum "$DST_KERNEL" | awk '{{print $1}}')
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 44
+test -f "$DST/etc/image-version"
+test -e "$DST/sbin/init"
+test -f "$DST/usr/bin/enigma2"
+
+echo 'Neues Sicherheitsbackup final verifiziert.'
+rm -rf "$OLD"
+rm -f "$OLD_KERNEL" "$NEW_KERNEL"
+sync
+trap - EXIT
+echo 'ROTATION_VERIFIED'
+'''.format(src=shq(src), dst=shq(dst), newdir=shq(newdir), olddir=shq(olddir),
+           src_kernel=shq(src_kernel), dst_kernel=shq(dst_kernel), newkernel=shq(newkernel),
+           oldkernel=shq(oldkernel), expected_old_hash=shq(expected_old_hash))
+        else:
+            script = r'''
+set -e
+SRC={src}
+DST={dst}
+NEW={newdir}
+OLD={olddir}
+
+restore_previous() {{
+    rc="$1"
+    if [ "$rc" -ne 0 ]; then
+        echo 'Rotation fehlgeschlagen – stelle vorheriges Backup wieder her.'
+        if [ -d "$OLD" ]; then
+            if [ -e "$DST" ]; then rm -rf "$DST"; fi
+            mv "$OLD" "$DST" 2>/dev/null || true
+        fi
+        if [ -e "$NEW" ]; then rm -rf "$NEW"; fi
+        sync
+    fi
+    exit "$rc"
+}}
+trap 'rc=$?; restore_previous "$rc"' EXIT
+
+test -d "$SRC"
+test -f "$SRC/etc/image-version"
+test -f "$SRC/zImage"
+test -d "$DST"
+test -f "$DST/etc/image-version"
+test -f "$DST/zImage"
+test ! -e "$NEW"
+test ! -e "$OLD"
+
+echo 'Erstelle neue Sicherung neben dem bisherigen Backup ...'
+mkdir "$NEW"
+cp -a "$SRC"/. "$NEW"/
+sync
+test -f "$NEW/etc/image-version"
+test -f "$NEW/zImage"
+SRC_HASH=$(sha256sum "$SRC/zImage" | awk '{{print $1}}')
+NEW_HASH=$(sha256sum "$NEW/zImage" | awk '{{print $1}}')
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$NEW_HASH" ] || exit 31
+echo 'Neue Sicherung vollständig kopiert und Kernel verifiziert.'
+
+mv "$DST" "$OLD"
+mv "$NEW" "$DST"
+sync
+test -f "$DST/etc/image-version"
+test -f "$DST/zImage"
+DST_HASH=$(sha256sum "$DST/zImage" | awk '{{print $1}}')
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 32
+echo 'Neues Sicherheitsbackup final verifiziert.'
+
+rm -rf "$OLD"
+sync
+trap - EXIT
+echo 'ROTATION_VERIFIED'
+'''.format(src=shq(src), dst=shq(dst), newdir=shq(newdir), olddir=shq(olddir))
+
+        self.busy = True
+        self.pending = {
+            "mode": "slot",
+            "state": dict(state),
+            "source": source,
+            "target": target,
+            "dst": dst,
+            "newdir": newdir,
+            "olddir": olddir,
+            "newkernel": newkernel if is_gbtrio4k() else "",
+            "oldkernel": oldkernel if is_gbtrio4k() else "",
+            "fingerprint": fingerprint,
+        }
+        self._ui_start(ui, "Auto-Rotation – neues Backup", "Status: Altes Backup bleibt erhalten, bis das neue verifiziert ist ...")
+        self._emit("Rotation startet: Slot %d → Sicherheits-Slot %d." % (source, target))
+        self.container = eConsoleAppContainer()
+        try:
+            self.container.dataAvail.append(self._data)
+            self.container.appClosed.append(self._closed)
+        except Exception:
+            self.container.dataAvail.connect(self._data)
+            self.container.appClosed.connect(self._closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+        return True
+
+### _closed_slot
+def _closed_slot(self, rc, pending, ui):
+        state = pending["state"]
+        target = pending["target"]
+        dst = pending["dst"]
+        now = int(time.time())
+        verified = (
+            rc == 0 and
+            not os.path.lexists(pending["newdir"]) and
+            not os.path.lexists(pending["olddir"]) and
+            (not pending.get("newkernel") or not os.path.lexists(pending["newkernel"])) and
+            (not pending.get("oldkernel") or not os.path.lexists(pending["oldkernel"])) and
+            slot_backup_valid(target, dst)
+        )
+        if verified:
+            enabled = bool(state.get("rotation_enabled", True))
+            created = datetime.now().strftime("%d.%m.%Y %H:%M")
+            new_state = dict(state)
+            new_state.update({
+                "backup_mode": "slot",
+                "source_slot": pending["source"],
+                "target_slot": target,
+                "created": created,
+                "created_sort": datetime.now().strftime("%Y%m%d%H%M%S"),
+                "verified": True,
+                "build": image_info().get("build", ""),
+            })
+            new_state = _rotation_seed(new_state, enabled, pending["fingerprint"], now)
+            if is_gbtrio4k():
+                new_state["kernel_device"] = kernel_device_for_slot(target)
+                new_state["kernel_sha256"] = sha256_prefix(new_state["kernel_device"])
+            save_state(new_state)
+            self._emit("Rotation erfolgreich. Vorheriges Backup erst NACH Verifikation entfernt.")
+            if ui is not None:
+                ui.backup_verified = True
+                ui.verified_backup_slot = target
+                ui.verified_backup_mode = "slot"
+                ui.set_backup_progress(100, "Auto-Rotation – Fertig", rotation_status_text(new_state))
+                ui["targetSlot"].setText("Slot %d – VERIFIZIERT ✓" % target)
+                ui.load_rollback()
+                ui.paint_update_state()
+            return
+
+        old_valid = slot_backup_valid(target, dst, state.get("kernel_sha256", ""))
+        state["rotation_last_check"] = now
+        state["rotation_last_error"] = "Rotation RC=%s" % rc
+        state["rotation_next_due"] = now + ROTATION_RETRY_INTERVAL
+        if not old_valid:
+            state["verified"] = False
+        save_state(_state_without_runtime_keys(state))
+        self._emit("Rotation FEHLGESCHLAGEN (RC=%s). Altes Backup gültig: %s" % (rc, "JA" if old_valid else "NEIN"))
+        if ui is not None:
+            ui.backup_verified = bool(old_valid)
+            ui.load_rollback()
+            ui.paint_update_state()
+            if old_valid:
+                ui.set_backup_progress(100, "Auto-Rotation – abgebrochen", "Status: Neues Backup verworfen · bisheriges Backup weiterhin verifiziert.")
+            else:
+                ui.set_backup_progress(0, "Auto-Rotation – FEHLER", "Status: Backup nicht mehr sicher verifizierbar · Update gesperrt.")
+
+### startup
+def startup(self):
+        self.update_clock()
+        self.update_box_identity()
+        try:
+            self.timer.start(30000, False)
+        except Exception:
+            pass
+        self.append_log("> Prüfe Multiboot-Schutz...")
+        self.refresh_status()
+        self.refresh_slots()
+        self.load_rollback()
+        self.paint_update_state()
+        self.paint_nav_focus()
+
+### refresh_slots
+def refresh_slots(self):
+        previous = None
+        if self.slots and 0 <= self.slot_index < len(self.slots):
+            previous = self.slots[self.slot_index]
+
+        self.slots = free_slots()
+
+        if previous in self.slots:
+            self.slot_index = self.slots.index(previous)
+        else:
+            self.slot_index = 0
+
+        if self.slots:
+            self["targetSlot"].setText("Slot %d – FREI" % self.slots[self.slot_index])
+            self.append_log("> Verifizierte freie Slots: %s" % ", ".join(str(x) for x in self.slots))
+        else:
+            self["targetSlot"].setText("Internes eMMC")
+            self.append_log("> Kein freier Multiboot-Slot – verwende internes eMMC-Sicherheitsbackup.")
+            self.append_log("> Vorhandene Slots und Recovery werden nicht überschrieben.")
+
+### prev_slot
+def prev_slot(self):
+        if self.busy or not self.slots:
+            return
+        self.slot_index = (self.slot_index - 1) % len(self.slots)
+        self["targetSlot"].setText("Slot %d – FREI" % self.slots[self.slot_index])
+
+### next_slot
+def next_slot(self):
+        if self.busy or not self.slots:
+            return
+        self.slot_index = (self.slot_index + 1) % len(self.slots)
+        self["targetSlot"].setText("Slot %d – FREI" % self.slots[self.slot_index])
+
+### set_backup_progress
+def set_backup_progress(self, value, title=None, status=None):
+        try:
+            value = max(0, min(100, int(value)))
+        except Exception:
+            value = 0
+        self.progress_value = value
+        try:
+            self["backupProgress"].setValue(value)
+            self["progressPercent"].setText("%d %%" % value)
+            if title is not None:
+                self["progressTitle"].setText(str(title))
+            if status is not None:
+                self["backupStatus"].setText(str(status))
+        except Exception:
+            pass
+
+### update_backup_progress
+def update_backup_progress(self):
+        if not self.busy or not self.backup_dst or self.backup_total_bytes <= 0:
+            return
+        try:
+            if not os.path.isdir(self.backup_dst):
+                return
+            copied = tree_size_bytes(self.backup_dst)
+            if copied <= 0:
+                return
+            ratio = min(1.0, float(copied) / float(self.backup_total_bytes))
+            value = 10 + int(ratio * 82)
+            if value > self.progress_value and value <= 92:
+                self.set_backup_progress(value, "Backup-Fortschritt – Kopieren", "Status: Kopiere aktuelles Image ...")
+        except Exception:
+            pass
+
+### paint_update_state
+def paint_update_state(self):
+        """Paint update availability; safety operations get a real red lock overlay."""
+        try:
+            self["updateHint"].show()
+            if self.busy:
+                lock_text = "UPDATE GESPERRT – BACKUP LÄUFT"
+                lock_hint = "Sicherheitsbackup wird erstellt und verifiziert."
+                if self.pending_delete is not None:
+                    lock_text = "UPDATE GESPERRT – LÖSCHEN LÄUFT"
+                    lock_hint = "Sicherheitsvorgang wird abgeschlossen."
+                elif self.pending_restore is not None:
+                    lock_text = "UPDATE GESPERRT – WIEDERHERSTELLUNG"
+                    lock_hint = "Notfall-Rückkehr wird sicher abgeschlossen."
+                self["updateButton"].setText(lock_text)
+                self["updateButton"].show()
+                self["updateHint"].setText(lock_hint)
+                try:
+                    self["updateButton"].instance.setBackgroundColor(parseColor("#9b111e"))
+                    self["updateButton"].instance.setForegroundColor(parseColor("#ffffff"))
+                    self["updateButton"].instance.setBorderColor(parseColor("#ff5a5f"))
+                    self["updateHint"].instance.setForegroundColor(parseColor("#ffb3b8"))
+                except Exception:
+                    pass
+            elif self.backup_verified:
+                # The enabled button is baked into background.png; hide the overlay.
+                self["updateButton"].hide()
+                self["updateHint"].setText("Backup verifiziert – Update freigegeben")
+                try:
+                    self["updateHint"].instance.setForegroundColor(parseColor("#55e8ff"))
+                except Exception:
+                    pass
+            else:
+                self["updateButton"].setText("OPENATV UPDATE STARTEN")
+                self["updateButton"].show()
+                self["updateHint"].setText("Wird nach erfolgreichem Backup freigeschaltet.")
+                try:
+                    self["updateButton"].instance.setBackgroundColor(parseColor("#29465a"))
+                    self["updateButton"].instance.setForegroundColor(parseColor("#a9bdca"))
+                    self["updateButton"].instance.setBorderColor(parseColor("#71cdea"))
+                    self["updateHint"].instance.setForegroundColor(parseColor("#b8d6e8"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+### start_internal_backup
+def start_internal_backup(self):
+        if self.busy:
+            return
+        source = current_slot()
+        if source is None:
+            self.session.open(MessageBox, "Aktiver Quellslot konnte nicht eindeutig erkannt werden.", MessageBox.TYPE_ERROR)
+            return
+        if source not in compatible_startup_slots():
+            self.session.open(MessageBox, "Aktiver Slot ist nicht eindeutig in STARTUP_N verifiziert.", MessageBox.TYPE_ERROR)
+            return
+
+        mp = ensure_full_mount(True)
+        if not mp:
+            self.session.open(MessageBox, "Internes Multiboot-Dateisystem konnte nicht sicher schreibbar geöffnet werden.", MessageBox.TYPE_ERROR)
+            return
+        src = active_source_path(mp)
+        if not src or not slot_root_tree_valid(src):
+            self.session.open(MessageBox, "Aktuelles Image konnte nicht vollständig verifiziert werden.", MessageBox.TYPE_ERROR)
+            return
+
+        backup_dir = internal_backup_dir(source, mp)
+        if not internal_backup_path_is_safe(backup_dir, source, mp):
+            self.session.open(MessageBox, "Interner Backup-Pfad besteht die Sicherheitsprüfung nicht.", MessageBox.TYPE_ERROR)
+            return
+        base = internal_backup_base(mp)
+        if os.path.lexists(base) and (not os.path.isdir(base) or os.path.islink(base)):
+            self.session.open(MessageBox, "Interner SafeUpdate-Bereich ist nicht sicher nutzbar.", MessageBox.TYPE_ERROR)
+            return
+        if os.path.lexists(backup_dir):
+            existing = validate_internal_backup_state(read_json_file(os.path.join(backup_dir, INTERNAL_BACKUP_META)), mp)
+            if existing:
+                self.session.open(MessageBox, "Für Slot %d existiert bereits ein verifiziertes internes Backup.\n\nTaste 0 löscht ausschließlich dieses SafeUpdate-Backup." % source, MessageBox.TYPE_INFO)
+            else:
+                self.session.open(MessageBox, "Im internen SafeUpdate-Bereich liegt ein unvollständiges Backup.\nEs wird aus Sicherheitsgründen nicht überschrieben.", MessageBox.TYPE_ERROR)
+            return
+
+        source_bytes = tree_size_bytes(src)
+        kernel_bytes = block_device_size(active_kernel_device()) if is_gbtrio4k() else 0
+        free_bytes = filesystem_free_bytes(mp)
+        reserve = 128 * 1024 * 1024
+        needed = source_bytes + kernel_bytes + reserve
+        if source_bytes <= 0 or free_bytes <= 0:
+            self.session.open(MessageBox, "Freier eMMC-Speicher bzw. Backup-Größe konnte nicht sicher ermittelt werden.", MessageBox.TYPE_ERROR)
+            return
+        if free_bytes < needed:
+            self.session.open(
+                MessageBox,
+                "Nicht genug freier interner eMMC-Speicher.\n\nBenötigt: ca. %d MB inkl. Reserve\nFrei: ca. %d MB" % (needed // (1024 * 1024), free_bytes // (1024 * 1024)),
+                MessageBox.TYPE_ERROR,
+            )
+            return
+
+        self.append_log("> Kein freier Slot – internes eMMC-Backup gewählt.")
+        self.append_log("> Backup-Bereich: /%s/slot%d" % (INTERNAL_BACKUP_DIRNAME, source))
+        self.append_log("> Freier eMMC-Speicher: %d MB" % (free_bytes // (1024 * 1024)))
+        self.session.openWithCallback(
+            lambda yes: self.do_internal_backup(yes, source, src, backup_dir, source_bytes),
+            MessageBox,
+            "Internes Sicherheitsbackup von Slot %d anlegen?\n\n"
+            "Kein vorhandener Multiboot-Slot wird verändert.\n"
+            "Recovery bleibt unangetastet.\n"
+            "Das Backup liegt separat unter /%s/." % (source, INTERNAL_BACKUP_DIRNAME),
+            MessageBox.TYPE_YESNO,
+        )
+
+### do_internal_backup
+def do_internal_backup(self, yes, source, src, backup_dir, source_bytes):
+        if not yes or self.busy:
+            return
+        mp = ensure_full_mount(True)
+        if not mp or not internal_backup_path_is_safe(backup_dir, source, mp):
+            self.session.open(MessageBox, "Backup abgebrochen: interner Zielpfad ist nicht mehr eindeutig.", MessageBox.TYPE_ERROR)
+            return
+        if os.path.lexists(backup_dir):
+            self.session.open(MessageBox, "Backup abgebrochen: interner Zielpfad existiert inzwischen.", MessageBox.TYPE_ERROR)
+            return
+        if os.path.realpath(src) == os.path.realpath(backup_dir) or os.path.realpath(backup_dir).startswith(os.path.realpath(src).rstrip("/") + "/"):
+            self.session.open(MessageBox, "Backup abgebrochen: Ziel liegt unerwartet im Quellimage.", MessageBox.TYPE_ERROR)
+            return
+
+        base = internal_backup_base(mp)
+        rootfs = os.path.join(backup_dir, "rootfs")
+        self.busy = True
+        self.backup_verified = False
+        self.paint_update_state()
+        self.backup_total_bytes = int(source_bytes or 0)
+        self.backup_dst = rootfs
+        self.pending_internal_backup = (source, backup_dir, src)
+        self.set_backup_progress(3, "Backup-Fortschritt – Prüfen", "Status: Internes eMMC-Backup wird vorbereitet ...")
+        try:
+            self.progress_timer.start(1500, False)
+        except Exception:
+            pass
+
+        if is_gbtrio4k():
+            src_kernel = active_kernel_device()
+            if not gigablue_kernel_layout_ok() or not src_kernel or not os.path.exists(src_kernel):
+                self.busy = False
+                self.pending_internal_backup = None
+                self.backup_dst = ""
+                self.session.open(MessageBox, "GigaBlue Kernelquelle ist nicht sicher verifizierbar.", MessageBox.TYPE_ERROR)
+                return
+            script = """
+set -e
+BASE={base}
+DST={dst}
+ROOTFS="$DST/rootfs"
+SRC={src}
+SRC_KERNEL={src_kernel}
+if [ -e "$BASE" ]; then test -d "$BASE"; test ! -L "$BASE"; else mkdir "$BASE"; fi
+test ! -L "$BASE"
+test ! -e "$DST"
+mkdir "$DST"
+mkdir "$ROOTFS"
+echo 'Internes Backup-Ziel ist weiterhin frei.'
+echo 'Synchronisiere Dateisystem...'
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$ROOTFS"/
+sync
+test -f "$ROOTFS/etc/image-version"
+test -e "$ROOTFS/sbin/init"
+test -f "$ROOTFS/usr/bin/enigma2"
+echo 'Kopiere GigaBlue Kernel in Sicherheitsdatei...'
+dd if="$SRC_KERNEL" of="$DST/kernel.img" bs=1048576 conv=fsync 2>/dev/null
+sync
+SRC_HASH=$(sha256sum "$SRC_KERNEL" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST/kernel.img" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+echo 'BACKUP_VERIFIED'
+""".format(base=shq(base), dst=shq(backup_dir), src=shq(src), src_kernel=shq(src_kernel))
+        else:
+            script = """
+set -e
+BASE={base}
+DST={dst}
+ROOTFS="$DST/rootfs"
+SRC={src}
+if [ -e "$BASE" ]; then test -d "$BASE"; test ! -L "$BASE"; else mkdir "$BASE"; fi
+test ! -L "$BASE"
+test ! -e "$DST"
+mkdir "$DST"
+mkdir "$ROOTFS"
+echo 'Internes Backup-Ziel ist weiterhin frei.'
+echo 'Synchronisiere Dateisystem...'
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$ROOTFS"/
+sync
+test -f "$ROOTFS/zImage"
+test -f "$ROOTFS/etc/image-version"
+SRC_HASH=$(sha256sum "$SRC/zImage" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$ROOTFS/zImage" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+echo 'BACKUP_VERIFIED'
+""".format(base=shq(base), dst=shq(backup_dir), src=shq(src))
+
+        self.append_log("> Internes eMMC-Sicherheitsbackup startet...")
+        self.connect_container(self.backup_data, self.internal_backup_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+
+### internal_backup_closed
+def internal_backup_closed(self, rc):
+        try:
+            self.progress_timer.stop()
+        except Exception:
+            pass
+        self.busy = False
+        pending = self.pending_internal_backup
+        self.pending_internal_backup = None
+        if not pending:
+            return
+        source, backup_dir, src = pending
+        rootfs = os.path.join(backup_dir, "rootfs")
+        verified = (rc == 0 and slot_root_tree_valid(rootfs))
+        kernel_hash = ""
+        kernel_size = 0
+        if verified:
+            if is_gbtrio4k():
+                src_kernel = active_kernel_device()
+                kernel_file = os.path.join(backup_dir, "kernel.img")
+                kernel_hash = sha256_prefix(src_kernel) if src_kernel else ""
+                verified = bool(kernel_hash and os.path.isfile(kernel_file) and sha256_prefix(kernel_file) == kernel_hash)
+                kernel_size = block_device_size(src_kernel) if src_kernel else 0
+                if verified and kernel_size > 0:
+                    try:
+                        verified = os.path.getsize(kernel_file) == kernel_size
+                    except Exception:
+                        verified = False
+            else:
+                src_z = os.path.join(src, "zImage")
+                dst_z = os.path.join(rootfs, "zImage")
+                kernel_hash = sha256_prefix(src_z)
+                verified = bool(kernel_hash and os.path.isfile(dst_z) and sha256_prefix(dst_z) == kernel_hash)
+
+        image_hash = sha256_prefix(os.path.join(rootfs, "etc", "image-version")) if verified else ""
+        if not image_hash:
+            verified = False
+
+        if verified:
+            created = datetime.now().strftime("%d.%m.%Y %H:%M")
+            meta = {
+                "backup_mode": "internal",
+                "source_slot": int(source),
+                "created": created,
+                "created_sort": datetime.now().strftime("%Y%m%d%H%M%S"),
+                "verified": True,
+                "build": image_info().get("build", ""),
+                "root_device": root_device(),
+                "backup_rel": "%s/slot%d" % (INTERNAL_BACKUP_DIRNAME, source),
+                "kernel_sha256": kernel_hash,
+                "kernel_size": kernel_size,
+                "image_version_sha256": image_hash,
+            }
+            meta = _rotation_seed(meta, True)
+            if is_gbtrio4k():
+                meta["kernel_source_device"] = active_kernel_device()
+            if save_json_file(os.path.join(backup_dir, INTERNAL_BACKUP_META), meta):
+                checked = validate_internal_backup_state(meta)
+            else:
+                checked = None
+            verified = checked is not None
+
+        if verified:
+            save_state(meta)
+            self.backup_verified = True
+            self.verified_backup_slot = None
+            self.verified_backup_mode = "internal"
+            self.verified_backup_path = backup_dir
+            self.recovery_state = checked
+            self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(meta))
+            self["targetSlot"].setText("Internes eMMC – VERIFIZIERT ✓")
+            self["rollback"].setText("Backup: Internes eMMC\nQuelle: Slot %d\nStatus: verifiziert\n0 = BACKUP LÖSCHEN" % source)
+            self.append_log("> Internes eMMC-Backup verifiziert. Update freigegeben.")
+            self.nav_focus = 6
+            self.last_action_focus = 6
+            self.paint_nav_focus()
+        else:
+            self.backup_verified = False
+            self.verified_backup_mode = None
+            self.set_backup_progress(self.progress_value, "Backup-Fortschritt – FEHLER", "Status: Internes Backup nicht vollständig verifiziert.")
+            self.append_log("> FEHLER: Internes eMMC-Backup nicht verifiziert.")
+            self.session.open(MessageBox, "Internes eMMC-Backup konnte nicht vollständig verifiziert werden.\nDas Update bleibt gesperrt.", MessageBox.TYPE_ERROR)
+        self.paint_update_state()
+        self.backup_dst = ""
+        self.backup_total_bytes = 0
+
+### start_backup
+def start_backup(self):
+        if self.busy:
+            return
+        if is_gbtrio4k() and not gigablue_kernel_layout_ok():
+            self.session.open(MessageBox, "GigaBlue Kernel-/Slot-Struktur ist nicht eindeutig verifizierbar.\nBackup bleibt gesperrt.", MessageBox.TYPE_ERROR)
+            return
+        # A verified backup stays visible after success. When the user explicitly
+        # starts another backup, switch the field back to the selected free target.
+        if self.backup_verified and self.slots:
+            self["targetSlot"].setText("Slot %d – FREI" % self.slots[self.slot_index])
+
+        if not self.slots:
+            self.start_internal_backup()
+            return
+
+        # Selected target from the last verified scan.
+        if self.slot_index < 0 or self.slot_index >= len(self.slots):
+            self.refresh_slots()
+            return
+
+        target = self.slots[self.slot_index]
+        source = current_slot()
+
+        # SECURITY CHECK #1:
+        # Re-scan immediately before doing anything writable. Never trust the
+        # slot list from screen startup because another tool may have changed it.
+        latest_free = free_slots()
+        if target not in latest_free:
+            self.append_log("> ABBRUCH: Zielslot %d ist nicht mehr verifiziert frei." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Zielslot %d ist nicht mehr eindeutig frei.\\n\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if source is None:
+            self.append_log("> ABBRUCH: Aktiver Quellslot nicht eindeutig erkannt.")
+            self.session.open(
+                MessageBox,
+                "Aktiver Quellslot konnte nicht eindeutig erkannt werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        target_info = compatible_startup_slots().get(target)
+        if not target_info:
+            self.append_log("> ABBRUCH: STARTUP_%d ist nicht kompatibel." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "STARTUP_%d ist nicht sicher für dieses Backup nutzbar.\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        # Switch/create the full view as writable only now, immediately before
+        # the confirmed backup flow.
+        mp = ensure_full_mount(True)
+        if not mp:
+            self.append_log("> ABBRUCH: Vollständiger Multiboot-Mount nicht schreibbar.")
+            self.session.open(
+                MessageBox,
+                "Multiboot-Datenträger konnte nicht sicher schreibbar geöffnet werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        src = active_source_path(mp)
+        dst = os.path.join(mp, target_info["rootsubdir"])
+
+        # SECURITY CHECK #2:
+        # Re-check source and target on the actual writable full mount.
+        if not src or not os.path.isdir(src):
+            self.append_log("> ABBRUCH: Quellpfad fehlt: %s" % (src or "?"))
+            self.session.open(
+                MessageBox,
+                "Quellslot konnte im vollständigen Multiboot-Dateisystem nicht verifiziert werden.\\n"
+                "Es wurde nichts verändert.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if not slot_root_tree_valid(src):
+            self.append_log("> ABBRUCH: Quellslot %d ist unvollständig." % source)
+            self.session.open(
+                MessageBox,
+                "Quellslot %d ist nicht vollständig verifizierbar.\\n"
+                "Es wurde nichts verändert." % source,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if os.path.lexists(dst) and not is_strictly_empty_dir(dst):
+            self.append_log("> ABBRUCH: Zielpfad existiert bereits: %s" % dst)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Zielslot %d ist nicht mehr frei.\n\n"
+                "Es wurde nichts überschrieben." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+        if is_strictly_empty_dir(dst):
+            self.append_log("> Leerer OpenATV-Rest in Slot %d erkannt (wird erst nach Bestätigung entfernt)." % target)
+
+        # STARTUP_N itself must still exist and remain valid. It is never
+        # overwritten by SafeUpdate2026; it defines which slots the box offers.
+        live_target_info = parse_startup_text(
+            target,
+            read_text(target_info["path"]),
+            target_info["path"]
+        )
+        if not live_target_info or not same_device(live_target_info["root_device"], root_device()):
+            self.append_log("> ABBRUCH: STARTUP_%d änderte sich während der Prüfung." % target)
+            self.refresh_slots()
+            self.session.open(
+                MessageBox,
+                "Die Bootdefinition von Slot %d ist nicht mehr eindeutig.\\n"
+                "Es wurde nichts verändert." % target,
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        # Space check before the confirmation dialog.
+        source_bytes = tree_size_bytes(src)
+        free_bytes = filesystem_free_bytes(mp)
+        reserve = 64 * 1024 * 1024
+        if source_bytes <= 0 or free_bytes <= 0:
+            self.append_log("> ABBRUCH: Speicherbedarf konnte nicht sicher geprüft werden.")
+            self.session.open(
+                MessageBox,
+                "Freier Speicher bzw. Backup-Größe konnte nicht sicher ermittelt werden.\\n"
+                "Backup bleibt gesperrt.",
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        if free_bytes < source_bytes + reserve:
+            self.append_log("> ABBRUCH: Nicht genug freier Speicher für Slot %d." % target)
+            self.session.open(
+                MessageBox,
+                "Nicht genug freier Speicher für ein vollständiges Backup.\\n\\n"
+                "Benötigt: ca. %d MB + 64 MB Reserve\\n"
+                "Frei: ca. %d MB" % (
+                    source_bytes // (1024 * 1024),
+                    free_bytes // (1024 * 1024)
+                ),
+                MessageBox.TYPE_ERROR
+            )
+            return
+
+        self.append_log("> Quelle verifiziert: Slot %d" % source)
+        self.append_log("> Ziel verifiziert frei: Slot %d" % target)
+        self.append_log("> STARTUP_%d: OK (wird nicht verändert)" % target)
+
+        self.session.openWithCallback(
+            lambda yes: self.do_backup(yes, source, target, src, dst, source_bytes),
+            MessageBox,
+            "Backup von Slot %d nach Slot %d anlegen?\\n\\n"
+            "Der Zielslot wurde unmittelbar vorher zweimal geprüft.\\n"
+            "Bestehende Slots werden niemals überschrieben." % (source, target),
+            MessageBox.TYPE_YESNO,
+        )
+
+### do_backup
+def do_backup(self, yes, source, target, src, dst, source_bytes):
+        if not yes:
+            return
+
+        # Final race check after the user's confirmation.
+        if os.path.lexists(dst):
+            if is_strictly_empty_dir(dst):
+                try:
+                    os.rmdir(dst)
+                    self.append_log("> Leeren Slot-Rest %d sicher entfernt." % target)
+                except Exception:
+                    self.append_log("> ABBRUCH: Leerer Zielrest konnte nicht entfernt werden.")
+                    return
+            else:
+                self.append_log("> ABBRUCH: Zielslot %d wurde zwischenzeitlich belegt." % target)
+                self.refresh_slots()
+                self.session.open(
+                    MessageBox,
+                    "Zielslot %d ist inzwischen nicht mehr frei.\n"
+                    "Es wurde nichts überschrieben." % target,
+                    MessageBox.TYPE_ERROR
+                )
+                return
+
+        self.busy = True
+        self.backup_verified = False
+        self.paint_update_state()
+        self.backup_total_bytes = int(source_bytes or 0)
+        self.backup_dst = dst
+        self.set_backup_progress(3, "Backup-Fortschritt – Prüfen", "Status: Backup wird vorbereitet ...")
+        try:
+            self.progress_timer.start(1500, False)
+        except Exception:
+            pass
+        self.append_log("> Backup Slot %d -> Slot %d startet..." % (source, target))
+
+        if is_gbtrio4k():
+            src_kernel = active_kernel_device()
+            dst_kernel = kernel_device_for_slot(target)
+            if (not gigablue_kernel_layout_ok() or not src_kernel or not dst_kernel or
+                    src_kernel == dst_kernel or dst_kernel != expected_kernel_device(target)):
+                self.busy = False
+                self.backup_dst = ""
+                self.backup_total_bytes = 0
+                self.set_backup_progress(0, "Backup-Fortschritt – FEHLER", "Status: GigaBlue Kernel-Slot nicht sicher verifizierbar.")
+                self.session.open(MessageBox, "GigaBlue Kernel-Slot ist nicht sicher verifizierbar.\nEs wurde kein Backup gestartet.", MessageBox.TYPE_ERROR)
+                return
+            script = """
+set -e
+SRC={src}
+DST={dst}
+SRC_KERNEL={src_kernel}
+DST_KERNEL={dst_kernel}
+
+test -d "$SRC"
+test -f "$SRC/etc/image-version"
+test -e "$SRC/sbin/init"
+test -f "$SRC/usr/bin/enigma2"
+test -b "$SRC_KERNEL"
+test -b "$DST_KERNEL"
+test ! -e "$DST"
+
+echo 'Zielslot ist weiterhin frei.'
+mkdir "$DST"
+echo 'Synchronisiere Dateisystem...'
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$DST"/
+sync
+
+test -f "$DST/etc/image-version"
+test -e "$DST/sbin/init"
+test -f "$DST/usr/bin/enigma2"
+
+echo 'Kopiere GigaBlue Kernel-Slot...'
+dd if="$SRC_KERNEL" of="$DST_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+sync
+SRC_HASH=$(sha256sum "$SRC_KERNEL" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST_KERNEL" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+
+echo 'BACKUP_VERIFIED'
+""".format(src=shq(src), dst=shq(dst), src_kernel=shq(src_kernel), dst_kernel=shq(dst_kernel))
+        else:
+            script = """
+set -e
+SRC={src}
+DST={dst}
+
+test -d "$SRC"
+test -f "$SRC/zImage"
+test -f "$SRC/etc/image-version"
+test ! -e "$DST"
+
+echo 'Zielslot ist weiterhin frei.'
+mkdir "$DST"
+echo 'Synchronisiere Dateisystem...'
+sync
+echo 'Kopiere Image...'
+cp -a "$SRC"/. "$DST"/
+sync
+
+test -f "$DST/zImage"
+test -f "$DST/etc/image-version"
+
+SRC_HASH=$(sha256sum "$SRC/zImage" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST/zImage" | awk '{{print $1}}')
+echo "Quelle zImage: $SRC_HASH"
+echo "Backup zImage: $DST_HASH"
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+
+echo 'BACKUP_VERIFIED'
+""".format(src=shq(src), dst=shq(dst))
+
+        self.pending_backup = (source, target, dst)
+        self.connect_container(self.backup_data, self.backup_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+
+### backup_data
+def backup_data(self, data):
+        try:
+            txt = data.decode("utf-8", "replace")
+        except Exception:
+            txt = str(data)
+        for line in txt.splitlines():
+            self.append_log("> " + line)
+            low = line.lower()
+            if "zielslot ist weiterhin frei" in low:
+                self.set_backup_progress(max(self.progress_value, 6), "Backup-Fortschritt – Prüfen", "Status: Zielslot geprüft ...")
+            elif "synchronisiere dateisystem" in low:
+                self.set_backup_progress(max(self.progress_value, 8), "Backup-Fortschritt – Vorbereiten", "Status: Dateisystem wird synchronisiert ...")
+            elif "kopiere image" in low:
+                self.set_backup_progress(max(self.progress_value, 10), "Backup-Fortschritt – Kopieren", "Status: Kopiere aktuelles Image ...")
+            elif "quelle zimage" in low or "backup zimage" in low:
+                self.set_backup_progress(max(self.progress_value, 95), "Backup-Fortschritt – Verifizieren", "Status: Prüfe Kernel und Integrität ...")
+            elif "backup_verified" in low:
+                self.set_backup_progress(99, "Backup-Fortschritt – Verifizieren", "Status: Abschlussprüfung ...")
+
+### backup_closed
+def backup_closed(self, rc):
+        try:
+            self.progress_timer.stop()
+        except Exception:
+            pass
+        self.busy = False
+        source, target, dst = self.pending_backup
+        verified = rc == 0 and slot_backup_valid(target, dst)
+        if verified:
+            self.backup_verified = True
+            self.verified_backup_slot = target
+            self.verified_backup_mode = "slot"
+            self.verified_backup_path = ""
+            created = datetime.now().strftime("%d.%m.%Y %H:%M")
+            state = {"backup_mode": "slot", "source_slot": source, "target_slot": target, "created": created, "created_sort": datetime.now().strftime("%Y%m%d%H%M%S"), "verified": True, "build": image_info().get("build", "")}
+            state = _rotation_seed(state, True)
+            if is_gbtrio4k():
+                state["kernel_device"] = kernel_device_for_slot(target)
+                state["kernel_sha256"] = sha256_prefix(state["kernel_device"])
+            save_state(state)
+            self.set_backup_progress(100, "Backup-Fortschritt – Fertig", rotation_status_text(state))
+            self["rollback"].setText("Backup-Slot:  %d\nQuelle:       Slot %d\nErstellt:     %s\n0 = BACKUP LÖSCHEN" % (target, source, created.split(" ")[0]))
+            self.append_log("> Backup verifiziert. Update freigegeben.")
+            self.refresh_slots()
+            self["targetSlot"].setText("Slot %d – VERIFIZIERT ✓" % target)
+            self.nav_focus = 6
+            self.last_action_focus = 6
+            self.paint_nav_focus()
+        else:
+            self.set_backup_progress(self.progress_value, "Backup-Fortschritt – FEHLER", "Status: Backup FEHLGESCHLAGEN – Zielslot nicht verwenden.")
+            self.append_log("> FEHLER: Backup nicht verifiziert.")
+            self.session.open(MessageBox, "Backup konnte nicht verifiziert werden.\nDer Zielslot wurde NICHT automatisch gelöscht.", MessageBox.TYPE_ERROR)
+        self.paint_update_state()
+        self.backup_dst = ""
+        self.backup_total_bytes = 0
+
+### request_delete_internal_backup
+def request_delete_internal_backup(self):
+        candidate = None
+        if isinstance(self.recovery_state, dict) and self.recovery_state.get("backup_mode") == "internal":
+            candidate = self.recovery_state
+        if candidate is None:
+            st = load_state()
+            if st.get("backup_mode") == "internal":
+                candidate = validate_internal_backup_state(st)
+        if candidate is None:
+            found = discover_internal_backups()
+            candidate = found[0] if found else None
+        if candidate is None:
+            self.session.open(MessageBox, "Kein verifiziertes internes SafeUpdate-Backup zum Löschen vorhanden.", MessageBox.TYPE_INFO)
+            return
+
+        mp = ensure_full_mount(True)
+        checked = validate_internal_backup_state(candidate, mp) if mp else None
+        if checked is None:
+            self.session.open(MessageBox, "KILLSWITCH blockiert: Internes Backup ist nicht mehr eindeutig verifizierbar.", MessageBox.TYPE_ERROR)
+            return
+        source = int(checked.get("source_slot"))
+        backup_dir = checked.get("_backup_dir", "")
+        if not internal_backup_path_is_safe(backup_dir, source, mp):
+            self.session.open(MessageBox, "KILLSWITCH blockiert: Backup-Pfad ist nicht sicher.", MessageBox.TYPE_ERROR)
+            return
+
+        self.session.openWithCallback(
+            lambda yes: self.do_delete_internal_backup(yes, checked),
+            MessageBox,
+            "KILLSWITCH: Internes Backup von Slot %d wirklich löschen?\n\n"
+            "Gelöscht wird ausschließlich /%s/slot%d.\n"
+            "Kein linuxrootfs-Slot, keine Kernelpartition und Recovery werden verändert.\n\n"
+            "Das OpenATV-Update wird anschließend wieder gesperrt." % (source, INTERNAL_BACKUP_DIRNAME, source),
+            MessageBox.TYPE_YESNO,
+        )
+
+### do_delete_internal_backup
+def do_delete_internal_backup(self, yes, state):
+        if not yes or self.busy:
+            return
+        mp = ensure_full_mount(True)
+        checked = validate_internal_backup_state(state, mp) if mp else None
+        if checked is None:
+            self.session.open(MessageBox, "Löschen abgebrochen: Backup konnte nicht erneut verifiziert werden.", MessageBox.TYPE_ERROR)
+            return
+        source = int(checked.get("source_slot"))
+        backup_dir = checked.get("_backup_dir", "")
+        if not internal_backup_path_is_safe(backup_dir, source, mp):
+            self.session.open(MessageBox, "Löschen abgebrochen: Backup-Pfad hat sich geändert.", MessageBox.TYPE_ERROR)
+            return
+
+        self.busy = True
+        self.backup_verified = False
+        self.paint_update_state()
+        self.pending_delete = ("internal", source, backup_dir)
+        self.set_backup_progress(0, "Backup-Fortschritt – Löschen", "Status: Lösche internes Sicherheitsbackup ...")
+        self.append_log("> KILLSWITCH: Lösche ausschließlich /%s/slot%d ..." % (INTERNAL_BACKUP_DIRNAME, source))
+        base = internal_backup_base(mp)
+        script = """
+set -e
+DST={dst}
+BASE={base}
+test -n "$DST"
+test "$DST" != "/"
+test -d "$DST"
+test ! -L "$DST"
+test -f "$DST/{meta}"
+rm -rf "$DST"
+sync
+test ! -e "$DST"
+rmdir "$BASE" 2>/dev/null || true
+echo 'BACKUP_DELETED'
+""".format(dst=shq(backup_dir), base=shq(base), meta=INTERNAL_BACKUP_META)
+        self.connect_container(self.delete_backup_data, self.internal_delete_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+
+### request_delete_backup
+def request_delete_backup(self):
+        """Safely remove only the verified SafeUpdate backup tree; keep STARTUP_N intact."""
+        if self.busy:
+            return
+        if self.verified_backup_mode == "internal" or (isinstance(self.recovery_state, dict) and self.recovery_state.get("backup_mode") == "internal"):
+            self.request_delete_internal_backup()
+            return
+        if not self.backup_verified or self.verified_backup_slot is None:
+            self.session.open(
+                MessageBox,
+                "Kein verifiziertes SafeUpdate-Backup zum Löschen vorhanden.",
+                MessageBox.TYPE_INFO,
+            )
+            return
+
+        st = load_state()
+        try:
+            target = int(self.verified_backup_slot)
+        except Exception:
+            target = -1
+        source = current_slot()
+
+        # Fail closed: only the exact backup recorded and physically revalidated by SafeUpdate may be deleted.
+        if (
+            target < 0 or
+            target == source or
+            not st.get("verified") or
+            int(st.get("target_slot", -1)) != target or
+            int(st.get("source_slot", -1)) != source
+        ):
+            self.append_log("> KILLSWITCH blockiert: Backup-Zuordnung nicht eindeutig.")
+            self.session.open(
+                MessageBox,
+                "Löschen blockiert. Das gespeicherte Backup ist nicht eindeutig dem laufenden Slot zugeordnet.",
+                MessageBox.TYPE_ERROR,
+            )
+            return
+
+        info = compatible_startup_slots().get(target)
+        mp = ensure_full_mount(True)
+        if not info or not mp:
+            self.append_log("> KILLSWITCH blockiert: Slot/Dateisystem nicht sicher verifizierbar.")
+            self.session.open(
+                MessageBox,
+                "Löschen blockiert. Zielslot oder Dateisystem konnte nicht sicher verifiziert werden.",
+                MessageBox.TYPE_ERROR,
+            )
+            return
+
+        dst = os.path.join(mp, info["rootsubdir"])
+        mp_real = os.path.realpath(mp)
+        dst_real = os.path.realpath(dst)
+        expected_suffix = "linuxrootfs%d" % target
+        safe_path = (
+            dst_real.startswith(mp_real.rstrip("/") + "/") and
+            os.path.basename(dst_real) == expected_suffix and
+            not os.path.islink(dst) and
+            os.path.isdir(dst) and
+            slot_root_tree_valid(dst) and
+            os.path.isfile(os.path.join(dst, "etc", "image-version")) and
+            os.path.exists(os.path.join(dst, "sbin", "init")) and
+            os.path.isfile(os.path.join(dst, "usr", "bin", "enigma2"))
+        )
+        if not safe_path:
+            self.append_log("> KILLSWITCH blockiert: Slot %d besteht Sicherheitsprüfung nicht." % target)
+            self.session.open(
+                MessageBox,
+                "Löschen blockiert. Slot %d besteht die Sicherheitsprüfung nicht." % target,
+                MessageBox.TYPE_ERROR,
+            )
+            return
+
+        self.session.openWithCallback(
+            lambda yes: self.do_delete_backup(yes, target, dst),
+            MessageBox,
+            "KILLSWITCH: Backup in Slot %d wirklich löschen?\n\n"
+            "Gelöscht wird NUR das von SafeUpdate verifizierte linuxrootfs%d-Verzeichnis.\n"
+            "STARTUP_%d bleibt erhalten, damit der Slot danach wieder sauber FREI ist.\n\n"
+            "Das OpenATV-Update wird anschließend wieder gesperrt." % (target, target, target),
+            MessageBox.TYPE_YESNO,
+        )
+
+### do_delete_backup
+def do_delete_backup(self, yes, target, dst):
+        if not yes:
+            return
+        if self.busy:
+            return
+
+        # Final race check immediately after confirmation.
+        info = compatible_startup_slots().get(int(target))
+        mp = ensure_full_mount(True)
+        if not info or not mp:
+            self.session.open(MessageBox, "Löschen abgebrochen: Slot konnte nicht erneut geprüft werden.", MessageBox.TYPE_ERROR)
+            return
+        current_dst = os.path.join(mp, info["rootsubdir"])
+        if os.path.realpath(current_dst) != os.path.realpath(dst) or int(target) == current_slot():
+            self.session.open(MessageBox, "Löschen abgebrochen: Slot-Zuordnung hat sich geändert.", MessageBox.TYPE_ERROR)
+            return
+
+        self.busy = True
+        self.backup_verified = False
+        self.paint_update_state()
+        self.pending_delete = (int(target), current_dst)
+        self.set_backup_progress(0, "Backup-Fortschritt – Löschen", "Status: Lösche Sicherheitsbackup aus Slot %d ..." % target)
+        self.append_log("> KILLSWITCH: Lösche verifiziertes Backup aus Slot %d ..." % target)
+
+        if is_gbtrio4k():
+            script = """
+set -e
+DST={dst}
+test -n "$DST"
+test "$DST" != "/"
+test -d "$DST"
+test ! -L "$DST"
+test -f "$DST/etc/image-version"
+test -e "$DST/sbin/init"
+test -f "$DST/usr/bin/enigma2"
+rm -rf "$DST"
+sync
+test ! -e "$DST"
+echo 'BACKUP_DELETED'
+""".format(dst=shq(current_dst))
+        else:
+            script = """
+set -e
+DST={dst}
+test -n "$DST"
+test "$DST" != "/"
+test -d "$DST"
+test ! -L "$DST"
+test -f "$DST/zImage"
+test -f "$DST/etc/image-version"
+rm -rf "$DST"
+sync
+test ! -e "$DST"
+echo 'BACKUP_DELETED'
+""".format(dst=shq(current_dst))
+
+        self.connect_container(self.delete_backup_data, self.delete_backup_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
+
+### delete_backup_data
+def delete_backup_data(self, data):
+        try:
+            txt = data.decode("utf-8", "replace")
+        except Exception:
+            txt = str(data)
+        for line in txt.splitlines():
+            self.append_log("> " + line)
+
+### delete_backup_closed
+def delete_backup_closed(self, rc):
+        self.busy = False
+        pending = self.pending_delete
+        self.pending_delete = None
+        if not pending:
+            return
+        target, dst = pending
+
+        deleted = (rc == 0 and not os.path.lexists(dst))
+        if deleted:
+            try:
+                if os.path.exists(STATE_FILE):
+                    os.unlink(STATE_FILE)
+            except Exception:
+                # If state cleanup fails, overwrite it fail-closed so a stale verified state can never unlock updates.
+                save_state({
+                    "source_slot": current_slot(),
+                    "target_slot": target,
+                    "verified": False,
+                    "deleted": datetime.now().strftime("%d.%m.%Y %H:%M"),
+                })
+            self.backup_verified = False
+            self.verified_backup_slot = None
+            self.set_backup_progress(0, "Backup-Fortschritt", "Status: Backup aus Slot %d gelöscht – Update gesperrt." % target)
+            self["rollback"].setText("Noch kein Backup vorhanden.")
+            self.append_log("> KILLSWITCH: Slot %d sauber gelöscht. STARTUP_%d blieb erhalten." % (target, target))
+            self.refresh_slots()
+            if target in self.slots:
+                self.slot_index = self.slots.index(target)
+                self["targetSlot"].setText("Slot %d – FREI" % target)
+            self.paint_update_state()
+            self.session.open(
+                MessageBox,
+                "Backup in Slot %d wurde sauber gelöscht.\n\nSTARTUP_%d blieb erhalten. Der Slot ist wieder frei und das Update ist gesperrt." % (target, target),
+                MessageBox.TYPE_INFO,
+            )
+            return
+
+        # A failed rm can leave a partial image. Never call that slot free automatically.
+        self.append_log("> KILLSWITCH FEHLER: Slot %d wurde nicht vollständig gelöscht." % target)
+        st = load_state()
+        st["verified"] = False
+        st["invalidated"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        save_state(st)
+        self.backup_verified = False
+        self.verified_backup_slot = None
+        self.set_backup_progress(0, "Backup-Fortschritt – FEHLER", "Status: Löschen unvollständig – Slot %d NICHT verwenden." % target)
+        self["rollback"].setText("Backup-Löschung unvollständig.\nSlot %d NICHT verwenden." % target)
+        self.paint_update_state()
+        self.session.open(
+            MessageBox,
+            "Backup konnte nicht vollständig gelöscht werden.\n\nSlot %d wird NICHT als frei behandelt. Bitte Details prüfen." % target,
+            MessageBox.TYPE_ERROR,
+        )
+
+### restore_internal_backup
+def restore_internal_backup(self):
+        if self.busy:
+            return
+        state = self.recovery_state
+        if not isinstance(state, dict) or state.get("backup_mode") != "internal":
+            found = discover_internal_backups()
+            state = found[0] if found else None
+        if state is None:
+            self.session.open(MessageBox, "Kein verifiziertes internes Notfall-Backup vorhanden.", MessageBox.TYPE_INFO)
+            return
+
+        mp = ensure_full_mount(True)
+        checked = validate_internal_backup_state(state, mp) if mp else None
+        if checked is None:
+            self.session.open(MessageBox, "Wiederherstellung blockiert: Backup ist nicht mehr vollständig verifizierbar.", MessageBox.TYPE_ERROR)
+            return
+        source = int(checked.get("source_slot"))
+        current = current_slot()
+        if current == source:
+            self.session.open(MessageBox, "Slot %d läuft gerade.\n\nEin laufender Slot wird niemals über sich selbst wiederhergestellt. Bitte zuerst einen anderen Slot booten." % source, MessageBox.TYPE_INFO)
+            return
+        info = compatible_startup_slots().get(source)
+        if not info or current is None:
+            self.session.open(MessageBox, "Zielslot konnte nicht sicher aus STARTUP_N bestimmt werden.", MessageBox.TYPE_ERROR)
+            return
+        target = os.path.join(mp, info["rootsubdir"])
+        active = active_source_path(mp)
+        if not active or os.path.realpath(target) == os.path.realpath(active):
+            self.session.open(MessageBox, "Wiederherstellung blockiert: Ziel würde den laufenden Slot treffen.", MessageBox.TYPE_ERROR)
+            return
+        expected = os.path.realpath(os.path.join(mp, "linuxrootfs%d" % source))
+        if os.path.realpath(target) != expected or not expected.startswith(os.path.realpath(mp).rstrip("/") + "/"):
+            self.session.open(MessageBox, "Wiederherstellung blockiert: Zielpfad ist nicht eindeutig.", MessageBox.TYPE_ERROR)
+            return
+        if os.path.lexists(target) and (not os.path.isdir(target) or os.path.islink(target)):
+            self.session.open(MessageBox, "Wiederherstellung blockiert: Ziel ist kein normales Slot-Verzeichnis.", MessageBox.TYPE_ERROR)
+            return
+        if is_gbtrio4k():
+            dst_kernel = expected_kernel_device(source)
+            if not dst_kernel or dst_kernel == active_kernel_device() or not os.path.exists(dst_kernel):
+                self.session.open(MessageBox, "Wiederherstellung blockiert: Kernel-Zielpartition ist nicht sicher.", MessageBox.TYPE_ERROR)
+                return
+
+        self.session.openWithCallback(
+            lambda yes: self.do_restore_internal_backup(yes, checked),
+            MessageBox,
+            "NOTFALL-RÜCKKEHR: Slot %d aus dem internen SafeUpdate-Backup wiederherstellen?\n\n"
+            "Aktuell läuft Slot %d.\n"
+            "Nur Slot %d wird ersetzt; der laufende Slot, andere Images und Recovery bleiben unangetastet." % (source, current, source),
+            MessageBox.TYPE_YESNO,
+        )
+
+### do_restore_internal_backup
+def do_restore_internal_backup(self, yes, state):
+        if not yes or self.busy:
+            return
+        mp = ensure_full_mount(True)
+        checked = validate_internal_backup_state(state, mp) if mp else None
+        if checked is None:
+            self.session.open(MessageBox, "Wiederherstellung abgebrochen: Backup-Prüfung ist nicht mehr gültig.", MessageBox.TYPE_ERROR)
+            return
+        source = int(checked.get("source_slot"))
+        current = current_slot()
+        if current is None or current == source:
+            self.session.open(MessageBox, "Wiederherstellung abgebrochen: Zielslot läuft jetzt selbst.", MessageBox.TYPE_ERROR)
+            return
+        info = compatible_startup_slots().get(source)
+        if not info:
+            self.session.open(MessageBox, "Wiederherstellung abgebrochen: STARTUP-Zuordnung fehlt.", MessageBox.TYPE_ERROR)
+            return
+        target = os.path.join(mp, info["rootsubdir"])
+        active = active_source_path(mp)
+        backup_root = checked.get("_rootfs", "")
+        if not active or os.path.realpath(target) == os.path.realpath(active) or not slot_root_tree_valid(backup_root):
+            self.session.open(MessageBox, "Wiederherstellung abgebrochen: Sicherheitsprüfung fehlgeschlagen.", MessageBox.TYPE_ERROR)
+            return
+
+        self.busy = True
+        self.pending_restore = (source, target, checked)
+        self.append_log("> NOTFALL-RÜCKKEHR: Stelle Slot %d wieder her ..." % source)
+        self.set_backup_progress(5, "Wiederherstellung – Prüfen", "Status: Verifiziertes Backup wird zurückgespielt ...")
+
+        if is_gbtrio4k():
+            kernel_file = os.path.join(checked.get("_backup_dir", ""), "kernel.img")
+            dst_kernel = expected_kernel_device(source)
+            if not dst_kernel or dst_kernel == active_kernel_device():
+                self.busy = False
+                self.pending_restore = None
+                self.session.open(MessageBox, "Kernel-Zielpartition ist nicht sicher.", MessageBox.TYPE_ERROR)
+                return
+            script = """
+set -e
+BACKUP={backup}
+TARGET={target}
+KERNEL_FILE={kernel_file}
+DST_KERNEL={dst_kernel}
+test -d "$BACKUP"
+test -f "$BACKUP/etc/image-version"
+test -e "$BACKUP/sbin/init"
+test -f "$BACKUP/usr/bin/enigma2"
+test -f "$KERNEL_FILE"
+test -b "$DST_KERNEL"
+test "$TARGET" != "/"
+if [ -e "$TARGET" ]; then test -d "$TARGET"; test ! -L "$TARGET"; rm -rf "$TARGET"; fi
+mkdir "$TARGET"
+echo 'Kopiere Image...'
+cp -a "$BACKUP"/. "$TARGET"/
+sync
+test -f "$TARGET/etc/image-version"
+test -e "$TARGET/sbin/init"
+test -f "$TARGET/usr/bin/enigma2"
+echo 'Stelle GigaBlue Kernel wieder her...'
+dd if="$KERNEL_FILE" of="$DST_KERNEL" bs=1048576 conv=fsync 2>/dev/null
+sync
+SRC_HASH=$(sha256sum "$KERNEL_FILE" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$DST_KERNEL" | awk '{{print $1}}')
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+echo 'RESTORE_VERIFIED'
+""".format(backup=shq(backup_root), target=shq(target), kernel_file=shq(kernel_file), dst_kernel=shq(dst_kernel))
+        else:
+            script = """
+set -e
+BACKUP={backup}
+TARGET={target}
+test -d "$BACKUP"
+test -f "$BACKUP/zImage"
+test -f "$BACKUP/etc/image-version"
+test "$TARGET" != "/"
+if [ -e "$TARGET" ]; then test -d "$TARGET"; test ! -L "$TARGET"; rm -rf "$TARGET"; fi
+mkdir "$TARGET"
+echo 'Kopiere Image...'
+cp -a "$BACKUP"/. "$TARGET"/
+sync
+SRC_HASH=$(sha256sum "$BACKUP/zImage" | awk '{{print $1}}')
+DST_HASH=$(sha256sum "$TARGET/zImage" | awk '{{print $1}}')
+[ -n "$SRC_HASH" ]
+[ "$SRC_HASH" = "$DST_HASH" ] || exit 22
+echo 'RESTORE_VERIFIED'
+""".format(backup=shq(backup_root), target=shq(target))
+
+        self.connect_container(self.restore_data, self.restore_closed)
+        self.container.execute("/bin/sh -c %s" % shq(script))
