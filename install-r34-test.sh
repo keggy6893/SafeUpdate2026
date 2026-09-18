@@ -22,14 +22,20 @@ backup_one() {
     SRC="$1"
     DST="$2"
     rm -f "$DST"
-    [ -e "$SRC" ] && cp -a "$SRC" "$DST"
+    if [ -e "$SRC" ]; then
+        cp -a "$SRC" "$DST"
+    fi
+    return 0
 }
 
 restore_one() {
     DST="$1"
     SRC="$2"
     rm -f "$DST"
-    [ -e "$SRC" ] && cp -a "$SRC" "$DST"
+    if [ -e "$SRC" ]; then
+        cp -a "$SRC" "$DST"
+    fi
+    return 0
 }
 
 register_bootguard() {
