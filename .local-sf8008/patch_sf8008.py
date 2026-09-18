@@ -89,8 +89,8 @@ if 'return is_gbtrio4k() or is_sf8008()' not in body:
     raise SystemExit('unexpected HISI helper body')
 
 left = [m.start() for m in re.finditer(r'is_gbtrio4k\(\)', s)]
-if len(left) != 1:
-    raise SystemExit('unexpected remaining is_gbtrio4k() calls: %d' % len(left))
+if len(left) != 2:
+    raise SystemExit('unexpected is_gbtrio4k() textual count: %d' % len(left))
 
 with io.open(path, 'w', encoding='utf-8', newline='\n') as f:
     f.write(s)
