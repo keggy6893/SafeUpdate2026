@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SafeUpdate2026 r34-dev1 recovery helper
+# SafeUpdate2026 r34-dev2 recovery helper
 # Runs outside Enigma2. Standard library only.
 
 import hashlib
@@ -12,6 +12,7 @@ import sys
 import time
 
 STATE_FILE = "/etc/enigma2/safeupdate2026.json"
+PLAN_FILE = "/boot/.safeupdate2026-recovery.json"
 MOUNTPOINT = "/tmp/safeupdate2026-recovery-root"
 NEW_SUFFIX = ".safeupdate-restore-new"
 OLD_SUFFIX = ".safeupdate-broken-old"
@@ -28,13 +29,23 @@ def read_text(path):
     except Exception:
         return ""
 
-def load_state():
+def load_json(path):
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+def write_json_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    subprocess.call(["sync"])
 
 def cmd_value(key):
     cmd = read_text("/proc/cmdline")
@@ -66,34 +77,56 @@ def resolve_root_spec(spec):
             if os.path.exists(p):
                 return os.path.realpath(p)
     try:
-        out = subprocess.check_output(["blkid", "-t", spec, "-o", "device"], stderr=subprocess.DEVNULL, text=True).strip().splitlines()
+        out = subprocess.check_output(
+            ["blkid", "-t", spec, "-o", "device"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip().splitlines()
         if out:
             return os.path.realpath(out[0])
     except Exception:
         pass
     return ""
 
+def safe_rootsubdir(value, slot):
+    value = os.path.normpath((value or "").strip().lstrip("/"))
+    if not value or value.startswith("../") or value == "..":
+        return ""
+    parts = [p for p in value.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return ""
+    if parts[-1] != "linuxrootfs%d" % int(slot):
+        return ""
+    return "/".join(parts)
+
 def parse_startup(slot):
     path = "/boot/STARTUP_%d" % int(slot)
     if not os.path.isfile(path) or os.path.islink(path):
         return None
     text = read_text(path)
+
     def grab(key):
         m = re.search(r"(?:^|[\s'\"])%s=([^\s'\"]+)" % key, text)
         return m.group(1) if m else ""
+
     root = grab("root")
-    rootsubdir = grab("rootsubdir")
+    rootsubdir = safe_rootsubdir(grab("rootsubdir"), slot)
     kernel = grab("kernel")
-    if rootsubdir != "linuxrootfs%d" % int(slot):
+    if not root or not rootsubdir or not kernel:
         return None
     rootdev = resolve_root_spec(root)
     if not rootdev:
         return None
+
     normkernel = os.path.normpath(kernel.lstrip("/"))
-    expected_kernel = "linuxrootfs%d/zImage" % int(slot)
+    expected_kernel = os.path.join(rootsubdir, "zImage")
     return {
-        "slot": int(slot), "path": path, "root": root, "rootdev": rootdev,
-        "rootsubdir": rootsubdir, "kernel": kernel,
+        "slot": int(slot),
+        "path": path,
+        "root": root,
+        "rootdev": rootdev,
+        "rootsubdir": rootsubdir,
+        "kernel": kernel,
         "kernel_in_tree": normkernel == expected_kernel,
     }
 
@@ -138,15 +171,26 @@ def valid_tree(path, expected_hash=""):
             return False
     return True
 
-def enigma2_running():
+def fs_error_seen(dev):
+    base = os.path.basename(os.path.realpath(dev or ""))
+    if not base:
+        return ""
     try:
-        return subprocess.call(["pidof", "enigma2"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        out = subprocess.check_output(["dmesg"], stderr=subprocess.STDOUT, text=True)
     except Exception:
-        return False
+        return ""
+    for line in out.splitlines():
+        low = line.lower()
+        if ("ext4-fs (%s)" % base).lower() in low and any(
+            x in low for x in ("error", "abort", "corrupt", "journal")
+        ):
+            return line.strip()
+        if "jbd2:" in low and any(x in low for x in ("invalid checksum", "error", "abort", "corrupt")):
+            return line.strip()
+    return ""
 
 def mount_root(dev):
     os.makedirs(MOUNTPOINT, exist_ok=True)
-    # Never reuse a mountpoint containing unrelated data.
     if os.path.ismount(MOUNTPOINT):
         subprocess.check_call(["umount", MOUNTPOINT])
     subprocess.check_call(["mount", "-o", "rw", dev, MOUNTPOINT])
@@ -155,7 +199,7 @@ def mount_root(dev):
 def unmount_root():
     try:
         if os.path.ismount(MOUNTPOINT):
-            subprocess.check_call(["sync"])
+            subprocess.call(["sync"])
             subprocess.call(["umount", MOUNTPOINT])
     except Exception:
         pass
@@ -163,39 +207,55 @@ def unmount_root():
 def headline():
     print("=" * 62)
     print("              SAFE UPDATE 2026 - RECOVERY")
-    print("                    r34-dev1 TEST")
+    print("                    r34-dev2 TEST")
     print("=" * 62)
 
-def state_or_die():
-    st = load_state()
-    if not st.get("verified"):
-        die("Kein verifiziertes SafeUpdate-Backup in %s." % STATE_FILE)
-    if st.get("backup_mode", "slot") != "slot":
-        die("Dieser Telnet-Test ist nur für bootbare Slot-Backups. Internes eMMC nutzt den bestehenden Notfall-Restore.")
+def relation_or_die():
+    plan = load_json(PLAN_FILE)
+    state = load_json(STATE_FILE)
+
+    if plan.get("version") == 2 and plan.get("source_slot") and plan.get("backup_slot"):
+        try:
+            source = int(plan["source_slot"])
+            backup = int(plan["backup_slot"])
+        except Exception:
+            die("Recovery-Plan enthält ungültige Slotnummern.")
+        if source <= 0 or backup <= 0 or source == backup:
+            die("Recovery-Plan enthält eine unsichere Slot-Zuordnung.")
+        expected_hash = str(plan.get("kernel_sha256") or "")
+        return plan, state, source, backup, expected_hash
+
+    if not state.get("verified") or state.get("backup_mode", "slot") != "slot":
+        die("Kein verifizierter Slot-Recovery-Plan vorhanden.")
     try:
-        source = int(st["source_slot"])
-        backup = int(st["target_slot"])
+        source = int(state["source_slot"])
+        backup = int(state["target_slot"])
     except Exception:
         die("Backup-Zuordnung source_slot/target_slot fehlt.")
     if source <= 0 or backup <= 0 or source == backup:
         die("Ungültige Slot-Zuordnung.")
-    return st, source, backup
+    return {}, state, source, backup, str(state.get("kernel_sha256") or "")
 
-def show_status(st, source, backup, cur):
-    print("Aktiver Slot:       %s" % ("nicht erkannt" if cur is None else cur))
-    print("Defekter Quellslot: %d" % source)
-    print("Sicherheits-Slot:   %d" % backup)
-    print("Backup erstellt:    %s" % st.get("created", "unbekannt"))
-    print("Backup verifiziert: JA")
-    print()
+def set_startup_once(slot):
+    info = parse_startup(slot)
+    if not info:
+        die("STARTUP_%d konnte nicht sicher validiert werden." % int(slot))
+    src = info["path"]
+    dst = "/boot/STARTUP_ONCE"
+    tmp = dst + ".safeupdate-new"
+    with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+        shutil.copyfileobj(fsrc, fdst)
+        fdst.flush()
+        os.fsync(fdst.fileno())
+    os.replace(tmp, dst)
+    subprocess.call(["sync"])
 
-def restore(st, source, backup, cur):
+def restore(plan, state, source, backup, expected_hash, auto=False, reboot_after=False):
+    cur = current_slot()
     if cur != backup:
-        die("Wiederherstellung nur erlaubt, wenn der Sicherheits-Slot %d gerade läuft." % backup)
+        die("Wiederherstellung ist nur erlaubt, während Sicherheits-Slot %d läuft." % backup)
     if cur == source:
         die("Der laufende Slot wird niemals über sich selbst überschrieben.")
-    if enigma2_running():
-        die("Enigma2 läuft noch. Zuerst 'init 4' ausführen und safeupdate-recover erneut starten.")
 
     src_info = parse_startup(backup)
     dst_info = parse_startup(source)
@@ -204,9 +264,17 @@ def restore(st, source, backup, cur):
     if src_info["rootdev"] != dst_info["rootdev"]:
         die("Quelle und Ziel liegen nicht auf demselben verifizierten Multiboot-Dateisystem.")
     if not src_info["kernel_in_tree"] or not dst_info["kernel_in_tree"]:
-        die("Separate Kernelpartition erkannt. r34-dev1 überschreibt diese NICHT.")
+        die("Separate Kernelpartition erkannt. r34-dev2 überschreibt diese NICHT.")
 
-    expected_hash = str(st.get("kernel_sha256") or "")
+    bad = fs_error_seen(src_info["rootdev"])
+    if bad:
+        if plan:
+            plan["phase"] = "blocked_fs_error"
+            plan["error"] = bad
+            plan["updated"] = int(time.time())
+            write_json_atomic(PLAN_FILE, plan)
+        die("Dateisystem meldet einen Kernel-/Journalfehler. Automatische Wiederherstellung bleibt gesperrt: %s" % bad)
+
     mp = mount_root(src_info["rootdev"])
     try:
         backup_dir = os.path.join(mp, src_info["rootsubdir"])
@@ -233,19 +301,23 @@ def restore(st, source, backup, cur):
             die("Nicht genug freier Speicher für sichere Doppelkopie. Benötigt zusätzlich ca. %.1f GiB." % (need / 1073741824.0))
 
         print("[OK] Sicherheits-Slot %d physisch verifiziert." % backup)
-        print("[OK] Ziel Slot %d ist NICHT der laufende Slot." % source)
+        print("[OK] Ziel Slot %d ist inaktiv." % source)
+        print("[OK] Dateisystem zeigt aktuell keinen EXT4-/Journalfehler.")
         print("[OK] Genug Platz für sichere Doppelkopie.")
-        print()
-        print("Slot %d  ======>  Slot %d" % (backup, source))
-        print("Der Sicherheits-Slot %d bleibt unverändert." % backup)
-        print("Der aktuelle Inhalt von Slot %d wird erst NACH Prüfung ersetzt." % source)
-        ans = input("\nWiederherstellung wirklich starten? [JA/nein]: ").strip().upper()
-        if ans != "JA":
-            print("Abgebrochen. Nichts verändert.")
-            return 0
+
+        if not auto:
+            ans = input("\nSlot %d aus Sicherheits-Slot %d wiederherstellen? [JA/nein]: " % (source, backup)).strip().upper()
+            if ans != "JA":
+                print("Abgebrochen. Nichts verändert.")
+                return 0
+
+        if plan:
+            plan["phase"] = "restoring"
+            plan["updated"] = int(time.time())
+            write_json_atomic(PLAN_FILE, plan)
 
         os.mkdir(new_dir)
-        print("\n[1/4] Kopiere verifiziertes Backup in temporären Zielbaum ...")
+        print("\n[1/4] Sicherheitsbackup wird kopiert ...")
         subprocess.check_call(["cp", "-a", backup_dir + "/.", new_dir + "/"])
         subprocess.check_call(["sync"])
         if not valid_tree(new_dir, expected_hash):
@@ -257,6 +329,7 @@ def restore(st, source, backup, cur):
             if not os.path.isdir(target_dir) or os.path.islink(target_dir):
                 die("Bestehender Zielslot ist kein normales Verzeichnis.")
             os.rename(target_dir, old_dir)
+
         try:
             os.rename(new_dir, target_dir)
             subprocess.check_call(["sync"])
@@ -271,6 +344,10 @@ def restore(st, source, backup, cur):
             if had_old and os.path.lexists(old_dir) and not os.path.lexists(target_dir):
                 os.rename(old_dir, target_dir)
             subprocess.call(["sync"])
+            if plan:
+                plan["phase"] = "restore_failed"
+                plan["updated"] = int(time.time())
+                write_json_atomic(PLAN_FILE, plan)
             die("Finale Prüfung fehlgeschlagen. Vorheriger Slot wurde soweit möglich zurückgesetzt.")
 
         print("[3/4] Slot %d final verifiziert." % source)
@@ -278,42 +355,58 @@ def restore(st, source, backup, cur):
             shutil.rmtree(old_dir)
             subprocess.check_call(["sync"])
         print("[4/4] Alter fehlerhafter Slot-Inhalt entfernt.")
+
+        set_startup_once(source)
+        if plan:
+            plan["phase"] = "restored"
+            plan["updated"] = int(time.time())
+            write_json_atomic(PLAN_FILE, plan)
+
         print("\n" + "=" * 62)
         print(" WIEDERHERSTELLUNG ERFOLGREICH")
         print("=" * 62)
         print("Slot %d wurde aus Sicherheits-Slot %d wiederhergestellt." % (source, backup))
         print("Sicherheits-Slot %d wurde NICHT verändert." % backup)
-        print("Jetzt im Multiboot-Menü wieder Slot %d starten." % source)
+        print("Der nächste Start ist einmalig auf Slot %d gesetzt." % source)
+
+        if reboot_after:
+            print("Box wird neu gestartet ...")
+            subprocess.call(["sync"])
+            time.sleep(2)
+            subprocess.call(["reboot"])
         return 0
     finally:
         unmount_root()
 
 def main():
     headline()
-    st, source, backup = state_or_die()
+    plan, state, source, backup, expected_hash = relation_or_die()
     cur = current_slot()
-    show_status(st, source, backup, cur)
+    print("Aktiver Slot:       %s" % ("nicht erkannt" if cur is None else cur))
+    print("Ursprünglicher Slot:%s" % (" %d" % source))
+    print("Sicherheits-Slot:   %d" % backup)
+    if plan:
+        print("Recovery-Phase:     %s" % plan.get("phase", "unbekannt"))
+    print()
 
     if cur is None:
         die("Aktiver Slot konnte nicht sicher aus /proc/cmdline bestimmt werden.")
 
+    if "--restore-auto-reboot" in sys.argv:
+        if not plan or plan.get("phase") not in ("fallback", "restore_failed"):
+            die("Automatische GUI-Wiederherstellung ist nicht freigegeben.")
+        return restore(plan, state, source, backup, expected_hash, auto=True, reboot_after=True)
+
     if cur == source:
-        print("Du bist noch im ursprünglichen Slot %d." % source)
-        print("Dieser Slot wird NICHT im laufenden Betrieb überschrieben.")
-        print()
-        print("Nächster Schritt:")
-        print("  1. Box neu starten")
-        print("  2. Im Multiboot-Menü Sicherheits-Slot %d wählen" % backup)
-        print("  3. Dort per Telnet: init 4")
-        print("  4. Danach: safeupdate-recover")
+        print("System läuft im ursprünglichen Slot %d." % source)
+        print("Keine manuelle Aktion nötig. r34-dev2 übernimmt den Recovery-Pfad nach einem Update automatisch.")
         return 0
 
     if cur != backup:
         die("Aktiver Slot %d ist weder Quellslot %d noch Sicherheits-Slot %d." % (cur, source, backup))
 
-    print("[OK] Sicherheits-Slot läuft.")
-    print("Wiederherstellung von Slot %d ist jetzt sicher möglich." % source)
-    return restore(st, source, backup, cur)
+    print("Sicherheits-Slot läuft. Der defekte Slot kann gefahrlos ersetzt werden.")
+    return restore(plan, state, source, backup, expected_hash, auto=False, reboot_after=False)
 
 if __name__ == "__main__":
     try:
